@@ -5,19 +5,21 @@ from dataclasses import dataclass
 # Mozzart Football Odds Model
 # =============================================================================
 # This model stores the stable football fields we currently understand from the
-# Mozzart live football page. It captures the live state shown on the page as
-# well as the current 1/X/2 odds when those odds are available.
+# Mozzart prematch football page. It captures fixture identity, kickoff text,
+# the extra market count, and the visible 1/X/2 odds.
 @dataclass(slots=True)
 class MozzartFootballOdds:
-    """Structured live football odds row extracted from Mozzart."""
+    """Structured prematch football odds row extracted from Mozzart."""
 
     source: str
     sport: str
     league: str
-    match_status: str
+    event_datetime_text: str
+    game_id: str
     home_team: str
     away_team: str
-    score_text: str
+    match_status: str | None
+    score_text: str | None
     extra_market_count: int | None
     home_odds: float | None
     draw_odds: float | None
@@ -30,19 +32,21 @@ class MozzartFootballOdds:
 # Mozzart Basketball Odds Model
 # =============================================================================
 # This model stores the stable basketball fields we currently understand from
-# the Mozzart live basketball page. It preserves the live state, visible score
-# text, extra markets, and the currently displayed winner-style odds.
+# the Mozzart prematch basketball page. It captures fixture identity, kickoff
+# text, the extra market count, and the visible winner-style odds.
 @dataclass(slots=True)
 class MozzartBasketballOdds:
-    """Structured live basketball odds row extracted from Mozzart."""
+    """Structured prematch basketball odds row extracted from Mozzart."""
 
     source: str
     sport: str
     league: str
-    match_status: str
+    event_datetime_text: str
+    game_id: str
     home_team: str
     away_team: str
-    score_text: str
+    match_status: str | None
+    score_text: str | None
     extra_market_count: int | None
     home_odds: float | None
     draw_odds: float | None

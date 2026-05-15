@@ -3,9 +3,9 @@
 Author: Data-Amigo
 Date: 2026-05-02
 Description:
-This script opens a Mozzart target page in Playwright, waits for the live page
- to render, prints DOM text clues from likely event containers, and logs
-network responses that may contain markets, odds, or event data.
+This script opens a Mozzart target page in Playwright, waits for the page to
+render, prints DOM text clues from likely event containers, and logs network
+responses that may contain markets, odds, or event data.
 """
 
 from __future__ import annotations
@@ -35,10 +35,10 @@ def _clean_text(value: str) -> str:
 # Main Live Inspection Function
 # =============================================================================
 def main() -> None:
-    """Inspect a live Mozzart page after browser rendering."""
+    """Inspect a Mozzart page after browser rendering."""
 
-    parser = argparse.ArgumentParser(description="Inspect a live Mozzart DOM and network activity.")
-    parser.add_argument("--target", default="live_landing", help="Mozzart target key to inspect.")
+    parser = argparse.ArgumentParser(description="Inspect a Mozzart DOM and network activity.")
+    parser.add_argument("--target", default="football_today", help="Mozzart target key to inspect.")
     parser.add_argument("--url", help="Optional URL override for the selected Mozzart page.")
     parser.add_argument("--settle-ms", type=int, default=12000, help="Extra time to wait after initial load.")
     parser.add_argument("--timeout-ms", type=int, default=60000, help="Maximum page load timeout.")
@@ -69,6 +69,7 @@ def main() -> None:
                     "football",
                     "basketball",
                     "api",
+                    "betting",
                 ]
             )
             if interesting and response_url not in matching_responses:

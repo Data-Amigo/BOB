@@ -3,9 +3,9 @@
 Author: Data-Amigo
 Date: 2026-05-02
 Description:
-This script fetches the live Mozzart basketball page with the shared browser
+This script fetches the Mozzart basketball prematch page with the shared browser
 layer, parses the stable basketball fields, and prints a structured preview for
- development and verification.
+development and verification.
 """
 
 from __future__ import annotations
@@ -25,7 +25,7 @@ from ganji_mtaani_agent.scrapers.sources import get_source_config, get_source_ta
 # Main Inspection Function
 # =============================================================================
 def main() -> None:
-    """Fetch the live Mozzart basketball page and inspect parsed rows."""
+    """Fetch the Mozzart basketball prematch page and inspect parsed rows."""
 
     parser = argparse.ArgumentParser(description="Inspect the Mozzart basketball parser output.")
     parser.add_argument("--limit", type=int, default=5, help="Number of parsed rows to print.")
@@ -36,7 +36,7 @@ def main() -> None:
     args = parser.parse_args()
 
     source = get_source_config("mozzart")
-    target = get_source_target(source, "basketball_live")
+    target = get_source_target(source, "basketball_today")
     settle_ms = args.settle_ms if args.settle_ms is not None else source.default_settle_ms
 
     headless = source.default_headless
@@ -78,10 +78,10 @@ def main() -> None:
         print("---")
         print(f"row_{index}:")
         print(f"  league: {row.league}")
-        print(f"  match_status: {row.match_status}")
+        print(f"  game_id: {row.game_id}")
+        print(f"  event_datetime_text: {row.event_datetime_text}")
         print(f"  home_team: {row.home_team}")
         print(f"  away_team: {row.away_team}")
-        print(f"  score_text: {row.score_text}")
         print(f"  extra_market_count: {row.extra_market_count}")
         print(f"  home_odds: {row.home_odds}")
         print(f"  draw_odds: {row.draw_odds}")

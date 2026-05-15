@@ -51,8 +51,8 @@ BOOKMAKER_PARSERS: dict[tuple[str, str], Callable[[str], list[object]]] = {
     ("betika", "basketball_today"): parse_betika_basketball,
     ("sportpesa", "football_today"): parse_sportpesa_football,
     ("sportpesa", "basketball_today"): parse_sportpesa_basketball,
-    ("mozzart", "football_live"): parse_mozzart_football,
-    ("mozzart", "basketball_live"): parse_mozzart_basketball,
+    ("mozzart", "football_today"): parse_mozzart_football,
+    ("mozzart", "basketball_today"): parse_mozzart_basketball,
 }
 
 
@@ -116,7 +116,7 @@ def build_argument_parser() -> argparse.ArgumentParser:
         "--target",
         type=str,
         default=None,
-        help="Optional target override such as football_today, basketball_today, or football_live.",
+        help="Optional target override such as football_today or basketball_today.",
     )
     bookmaker_parser.add_argument(
         "--limit",
