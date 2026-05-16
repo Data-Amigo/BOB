@@ -1,3 +1,3 @@
-from ganji_mtaani_agent.dashboard.app import main
+"""Dashboard package for the BoB Streamlit app."""
 
-__all__ = ["main"]
+__all__: list[str] = []

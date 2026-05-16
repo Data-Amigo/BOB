@@ -341,3 +341,201 @@ def upsert_sports_results(
         )
 
     return len(prepared_rows)
+
+
+# =============================================================================
+# Forebet Prediction Repository
+# =============================================================================
+def insert_forebet_predictions(
+    connection: Connection,
+    *,
+    run_id: int,
+    rows: Sequence[Any],
+) -> int:
+    """Insert normalized Forebet prediction rows into the shared predictions table."""
+
+    prepared_rows: list[tuple[Any, ...]] = []
+
+    for row in rows:
+        record = _as_record_dict(row)
+        prepared_rows.append(
+            (
+                run_id,
+                record.get("source"),
+                record.get("sport"),
+                record.get("league"),
+                record.get("home_team"),
+                record.get("away_team"),
+                record.get("event_datetime"),
+                record.get("prob_1"),
+                record.get("prob_x"),
+                record.get("prob_2"),
+                record.get("pred_outcome"),
+                record.get("predicted_home_score"),
+                record.get("predicted_away_score"),
+                record.get("correct_score_text"),
+                record.get("avg_goals"),
+                record.get("avg_points"),
+                record.get("weather"),
+                record.get("coef_1"),
+                record.get("coef_x"),
+                record.get("coef_2"),
+                record.get("coef_3"),
+                record.get("coef_extra"),
+                Jsonb(record.get("remaining_tokens") or []),
+                record.get("raw_text"),
+                record.get("confidence"),
+            )
+        )
+
+    if not prepared_rows:
+        return 0
+
+    with connection.cursor() as cursor:
+        cursor.executemany(
+            """
+            INSERT INTO forebet_predictions (
+                run_id,
+                source_name,
+                sport,
+                league,
+                home_team,
+                away_team,
+                event_datetime_text,
+                prob_1,
+                prob_x,
+                prob_2,
+                pred_outcome,
+                predicted_home_score,
+                predicted_away_score,
+                correct_score_text,
+                avg_goals,
+                avg_points,
+                weather,
+                coef_1,
+                coef_x,
+                coef_2,
+                coef_3,
+                coef_extra,
+                remaining_tokens_json,
+                raw_text,
+                confidence
+            )
+            VALUES (
+                %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                %s, %s, %s, %s, %s
+            )
+            """,
+            prepared_rows,
+        )
+
+    return len(prepared_rows)
+
+
+# =============================================================================
+# Polymarket Market Repository
+# =============================================================================
+def upsert_polymarket_markets(
+    connection: Connection,
+    *,
+    run_id: int,
+    rows: Sequence[Any],
+) -> int:
+    """Insert or update normalized Polymarket market rows."""
+
+    prepared_rows: list[tuple[Any, ...]] = []
+
+    for row in rows:
+        record = _as_record_dict(row)
+        prepared_rows.append(
+            (
+                run_id,
+                record.get("source"),
+                record.get("market_id"),
+                record.get("event_id"),
+                record.get("question"),
+                record.get("slug"),
+                record.get("category"),
+                record.get("subcategory"),
+                Jsonb(record.get("tags") or []),
+                record.get("description"),
+                record.get("start_date"),
+                record.get("end_date"),
+                record.get("active"),
+                record.get("closed"),
+                record.get("archived"),
+                Jsonb(record.get("outcomes") or []),
+                Jsonb(record.get("outcome_prices") or []),
+                record.get("liquidity"),
+                record.get("volume"),
+                record.get("open_interest"),
+                record.get("market_type"),
+                Jsonb(record.get("raw_record") or {}),
+                record.get("confidence"),
+            )
+        )
+
+    if not prepared_rows:
+        return 0
+
+    with connection.cursor() as cursor:
+        cursor.executemany(
+            """
+            INSERT INTO polymarket_markets (
+                run_id,
+                source_name,
+                market_id,
+                event_id,
+                question,
+                slug,
+                category,
+                subcategory,
+                tags_json,
+                description,
+                start_date,
+                end_date,
+                active,
+                closed,
+                archived,
+                outcomes_json,
+                outcome_prices_json,
+                liquidity,
+                volume,
+                open_interest,
+                market_type,
+                raw_record_json,
+                confidence
+            )
+            VALUES (
+                %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
+            )
+            ON CONFLICT (source_name, market_id)
+            DO UPDATE SET
+                run_id = EXCLUDED.run_id,
+                event_id = EXCLUDED.event_id,
+                question = EXCLUDED.question,
+                slug = EXCLUDED.slug,
+                category = EXCLUDED.category,
+                subcategory = EXCLUDED.subcategory,
+                tags_json = EXCLUDED.tags_json,
+                description = EXCLUDED.description,
+                start_date = EXCLUDED.start_date,
+                end_date = EXCLUDED.end_date,
+                active = EXCLUDED.active,
+                closed = EXCLUDED.closed,
+                archived = EXCLUDED.archived,
+                outcomes_json = EXCLUDED.outcomes_json,
+                outcome_prices_json = EXCLUDED.outcome_prices_json,
+                liquidity = EXCLUDED.liquidity,
+                volume = EXCLUDED.volume,
+                open_interest = EXCLUDED.open_interest,
+                market_type = EXCLUDED.market_type,
+                raw_record_json = EXCLUDED.raw_record_json,
+                confidence = EXCLUDED.confidence
+            """,
+            prepared_rows,
+        )
+
+    return len(prepared_rows)
