@@ -38,6 +38,20 @@ def fetch_table_inventory() -> list[dict[str, Any]]:
 
 
 @st.cache_data(ttl=120)
+def fetch_latest_ingestion_batches(limit: int = 20) -> list[dict[str, Any]]:
+    return _fetch_all(
+        """
+        SELECT id, batch_name, batch_date, status, started_at, finished_at,
+               triggered_by, total_sources, successful_sources, failed_sources, notes
+        FROM ingestion_batches
+        ORDER BY id DESC
+        LIMIT %s
+        """,
+        (limit,),
+    )
+
+
+@st.cache_data(ttl=120)
 def fetch_latest_source_runs(limit: int = 50) -> list[dict[str, Any]]:
     return _fetch_all(
         """

@@ -27,6 +27,7 @@ from ganji_mtaani_agent.parsers.forebet import (
     parse_forebet_football,
 )
 from ganji_mtaani_agent.scrapers.browser import fetch_page
+from ganji_mtaani_agent.scrapers.forebet import build_forebet_collection_urls
 from ganji_mtaani_agent.scrapers.sources import get_source_config, get_source_target
 
 
@@ -56,6 +57,28 @@ def parse_forebet_target(target_name: str, html: str):
         return parse_forebet_football(html)
 
     raise ValueError(f"No parser is configured for Forebet target '{target_name}'.")
+
+
+def _normalized_text(value: str | None) -> str:
+    return " ".join((value or "").split()).casefold()
+
+
+def dedupe_predictions(predictions: list) -> list:
+    """Deduplicate parsed Forebet predictions by fixture identity."""
+
+    deduped: dict[tuple[str, str, str, str, str], object] = {}
+
+    for prediction in predictions:
+        key = (
+            _normalized_text(getattr(prediction, "sport", None)),
+            _normalized_text(getattr(prediction, "league", None)),
+            _normalized_text(getattr(prediction, "home_team", None)),
+            _normalized_text(getattr(prediction, "away_team", None)),
+            _normalized_text(getattr(prediction, "event_datetime", None)),
+        )
+        deduped.setdefault(key, prediction)
+
+    return list(deduped.values())
 
 
 # =============================================================================
@@ -147,34 +170,55 @@ def main() -> None:
         if args.screenshot:
             screenshot_path = built_screenshot_path
 
-    result = fetch_page(
-        target.url,
-        wait_until=source.default_wait_until,
-        settle_ms=source.default_settle_ms,
-        headless=args.headless if args.headless else source.default_headless,
-        snapshot_path=snapshot_path,
-        screenshot_path=screenshot_path,
-    )
+    collection_urls = build_forebet_collection_urls(target.name, target.url)
+    predictions: list = []
+    page_summaries: list[dict[str, object]] = []
+
+    for index, url in enumerate(collection_urls, start=1):
+        result = fetch_page(
+            url,
+            wait_until=source.default_wait_until,
+            settle_ms=source.default_settle_ms,
+            headless=args.headless if args.headless else source.default_headless,
+            snapshot_path=snapshot_path if index == 1 else None,
+            screenshot_path=screenshot_path if index == 1 else None,
+        )
+
+        page_summaries.append(
+            {
+                "url": url,
+                "status": result.status,
+                "title": result.title,
+                "html_length": result.html_length,
+                "warnings": result.warnings,
+                "error": result.error,
+            }
+        )
+
+        if result.error:
+            continue
+
+        predictions.extend(parse_forebet_target(target.name, result.html))
+
+    predictions = dedupe_predictions(predictions)
 
     print(f"source: {source.display_name}")
     print(f"target: {target.display_name}")
     print(f"sport: {target.sport}")
-    print(f"status: {result.status}")
-    print(f"title: {result.title}")
-    print(f"html_length: {result.html_length}")
-    print(f"snapshot_path: {result.snapshot_path}")
-    print(f"screenshot_path: {result.screenshot_path}")
+    print(f"collection_urls: {len(collection_urls)}")
+    print(f"snapshot_path: {snapshot_path}")
+    print(f"screenshot_path: {screenshot_path}")
+    print("page_summaries:")
+    for summary in page_summaries:
+        print(f"- url: {summary['url']}")
+        print(f"  status: {summary['status']}")
+        print(f"  title: {summary['title']}")
+        print(f"  html_length: {summary['html_length']}")
+        if summary["warnings"]:
+            print(f"  warnings: {summary['warnings']}")
+        if summary["error"]:
+            print(f"  error: {summary['error']}")
 
-    if result.warnings:
-        print("warnings:")
-        for warning in result.warnings:
-            print(f"- {warning}")
-
-    if result.error:
-        print(f"error: {result.error}")
-        return
-
-    predictions = parse_forebet_target(target.name, result.html)
     print_prediction_preview(target.name, predictions, args.limit)
 
 

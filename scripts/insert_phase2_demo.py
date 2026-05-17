@@ -24,6 +24,7 @@ from ganji_mtaani_agent.db import (
 from ganji_mtaani_agent.models.polymarket_fetch import PolymarketFetchConfig
 from ganji_mtaani_agent.parsers.forebet import parse_forebet_basketball, parse_forebet_football
 from ganji_mtaani_agent.scrapers.browser import fetch_page
+from ganji_mtaani_agent.scrapers.forebet import build_forebet_collection_urls
 from ganji_mtaani_agent.scrapers.polymarket import fetch_polymarket_markets, fetch_polymarket_raw
 from ganji_mtaani_agent.scrapers.sources import get_source_config, get_source_target
 
@@ -34,7 +35,7 @@ def build_argument_parser() -> argparse.ArgumentParser:
 
     forebet_parser = subparsers.add_parser("forebet", help="Fetch Forebet HTML, parse predictions, and insert them.")
     forebet_parser.add_argument("--target", choices=["football_today", "basketball_today"], default="football_today")
-    forebet_parser.add_argument("--limit", type=int, default=50)
+    forebet_parser.add_argument("--limit", type=int, default=0, help="0 means no artificial row cap.")
     forebet_parser.add_argument("--headed", action="store_true")
     forebet_parser.add_argument("--headless", action="store_true")
     forebet_parser.add_argument("--timeout-ms", type=int, default=60000)
@@ -57,6 +58,26 @@ def _parse_forebet_target(target_name: str, html: str):
     raise ValueError(f"No parser configured for Forebet target {target_name!r}")
 
 
+def _normalized_text(value: str | None) -> str:
+    return " ".join((value or "").split()).casefold()
+
+
+def _dedupe_forebet_predictions(rows: list[object]) -> list[object]:
+    deduped: dict[tuple[str, str, str, str, str], object] = {}
+
+    for row in rows:
+        key = (
+            _normalized_text(getattr(row, "sport", None)),
+            _normalized_text(getattr(row, "league", None)),
+            _normalized_text(getattr(row, "home_team", None)),
+            _normalized_text(getattr(row, "away_team", None)),
+            _normalized_text(getattr(row, "event_datetime", None)),
+        )
+        deduped.setdefault(key, row)
+
+    return list(deduped.values())
+
+
 def insert_forebet_flow(args: argparse.Namespace) -> None:
     started_at = datetime.now(UTC)
     timer_start = perf_counter()
@@ -77,6 +98,7 @@ def insert_forebet_flow(args: argparse.Namespace) -> None:
             source_type="browser",
             status="running",
             started_at=started_at,
+            batch_id=getattr(args, "batch_id", None),
             metadata_json={
                 "url": target.url,
                 "sport": target.sport,
@@ -87,17 +109,43 @@ def insert_forebet_flow(args: argparse.Namespace) -> None:
         )
 
         try:
-            result = fetch_page(
-                target.url,
-                timeout_ms=args.timeout_ms,
-                wait_until=source.default_wait_until,
-                settle_ms=settle_ms,
-                headless=headless,
-            )
-            if result.error:
-                raise RuntimeError(result.error)
+            collection_urls = build_forebet_collection_urls(target.name, target.url)
+            collected_rows: list[object] = []
+            page_summaries: list[dict[str, object]] = []
+            warning_count = 0
 
-            normalized_rows = _parse_forebet_target(target.name, result.html)[: args.limit]
+            for url in collection_urls:
+                result = fetch_page(
+                    url,
+                    timeout_ms=args.timeout_ms,
+                    wait_until=source.default_wait_until,
+                    settle_ms=settle_ms,
+                    headless=headless,
+                )
+                warning_count += len(result.warnings)
+
+                if result.error:
+                    page_summaries.append({"url": url, "status": "failed", "error": result.error})
+                    continue
+
+                parsed_rows = _parse_forebet_target(target.name, result.html)
+                collected_rows.extend(parsed_rows)
+                page_summaries.append(
+                    {
+                        "url": url,
+                        "status": "success",
+                        "title": result.title,
+                        "html_length": result.html_length,
+                        "parsed_rows": len(parsed_rows),
+                    }
+                )
+
+            if not collected_rows:
+                raise RuntimeError("Forebet collection returned no parseable rows across all configured URLs.")
+
+            normalized_rows = _dedupe_forebet_predictions(collected_rows)
+            if args.limit > 0:
+                normalized_rows = normalized_rows[: args.limit]
             inserted_count = insert_forebet_predictions(connection, run_id=run_id, rows=normalized_rows)
 
             finished_at = datetime.now(UTC)
@@ -109,17 +157,18 @@ def insert_forebet_flow(args: argparse.Namespace) -> None:
                 finished_at=finished_at,
                 duration_ms=duration_ms,
                 records_found=inserted_count,
-                warnings_count=len(result.warnings),
+                warnings_count=warning_count,
                 metadata_json={
                     "url": target.url,
+                    "collection_urls": collection_urls,
                     "sport": target.sport,
                     "limit": args.limit,
                     "headless": headless,
                     "settle_ms": settle_ms,
-                    "title": result.title,
-                    "html_length": result.html_length,
+                    "raw_rows_collected": len(collected_rows),
+                    "unique_rows_collected": len(normalized_rows),
                     "inserted_count": inserted_count,
-                    "warnings": result.warnings,
+                    "page_summaries": page_summaries,
                 },
             )
         except Exception as exc:
@@ -146,6 +195,12 @@ def insert_forebet_flow(args: argparse.Namespace) -> None:
     print(f"run_id: {run_id}")
     print(f"inserted_forebet_predictions: {inserted_count}")
     print(f"warnings: {len(result.warnings)}")
+    return {
+        "run_id": run_id,
+        "source_name": source.name,
+        "target_name": target.name,
+        "records_found": inserted_count,
+    }
 
 
 def insert_polymarket_flow(args: argparse.Namespace) -> None:
@@ -166,6 +221,7 @@ def insert_polymarket_flow(args: argparse.Namespace) -> None:
             source_type="api",
             status="running",
             started_at=started_at,
+            batch_id=getattr(args, "batch_id", None),
             metadata_json={
                 "limit": args.limit,
                 "scan_limit": args.scan_limit,
@@ -223,6 +279,12 @@ def insert_polymarket_flow(args: argparse.Namespace) -> None:
     print(f"raw_markets: {len(raw_response.markets)}")
     print(f"raw_events: {len(raw_response.events)}")
     print(f"upserted_polymarket_markets: {inserted_count}")
+    return {
+        "run_id": run_id,
+        "source_name": "polymarket",
+        "target_name": "markets",
+        "records_found": inserted_count,
+    }
 
 
 def main() -> None:

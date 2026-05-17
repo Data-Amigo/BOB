@@ -66,6 +66,7 @@ def insert_source_run(
     source_type: str,
     status: str,
     started_at: datetime,
+    batch_id: int | None = None,
     metadata_json: dict[str, Any] | None = None,
 ) -> int:
     """Insert a new source run row and return its generated id."""
@@ -74,6 +75,7 @@ def insert_source_run(
         cursor.execute(
             """
             INSERT INTO source_runs (
+                batch_id,
                 source_name,
                 target_name,
                 source_type,
@@ -81,10 +83,11 @@ def insert_source_run(
                 started_at,
                 metadata_json
             )
-            VALUES (%s, %s, %s, %s, %s, %s)
+            VALUES (%s, %s, %s, %s, %s, %s, %s)
             RETURNING id
             """,
             (
+                batch_id,
                 source_name,
                 target_name,
                 source_type,
@@ -94,6 +97,94 @@ def insert_source_run(
             ),
         )
         return int(cursor.fetchone()[0])
+
+
+def insert_ingestion_batch(
+    connection: Connection,
+    *,
+    batch_name: str,
+    batch_date: date,
+    status: str,
+    started_at: datetime,
+    triggered_by: str | None = None,
+    notes: str | None = None,
+    metadata_json: dict[str, Any] | None = None,
+) -> int:
+    """Insert a new ingestion batch row and return its generated id."""
+
+    with connection.cursor() as cursor:
+        cursor.execute(
+            """
+            INSERT INTO ingestion_batches (
+                batch_name,
+                batch_date,
+                status,
+                started_at,
+                triggered_by,
+                notes,
+                metadata_json
+            )
+            VALUES (%s, %s, %s, %s, %s, %s, %s)
+            RETURNING id
+            """,
+            (
+                batch_name,
+                batch_date,
+                status,
+                started_at,
+                triggered_by,
+                notes,
+                Jsonb(metadata_json or {}),
+            ),
+        )
+        return int(cursor.fetchone()[0])
+
+
+def update_ingestion_batch(
+    connection: Connection,
+    batch_id: int,
+    *,
+    status: str,
+    finished_at: datetime | None = None,
+    total_sources: int | None = None,
+    successful_sources: int | None = None,
+    failed_sources: int | None = None,
+    notes: str | None = None,
+    metadata_json: dict[str, Any] | None = None,
+) -> None:
+    """Update the final status fields for an ingestion batch row."""
+
+    metadata_payload = Jsonb(metadata_json) if metadata_json is not None else None
+
+    with connection.cursor() as cursor:
+        cursor.execute(
+            """
+            UPDATE ingestion_batches
+            SET
+                status = %s,
+                finished_at = COALESCE(%s, finished_at),
+                total_sources = COALESCE(%s, total_sources),
+                successful_sources = COALESCE(%s, successful_sources),
+                failed_sources = COALESCE(%s, failed_sources),
+                notes = COALESCE(%s, notes),
+                metadata_json = CASE
+                    WHEN %s IS NULL THEN metadata_json
+                    ELSE %s
+                END
+            WHERE id = %s
+            """,
+            (
+                status,
+                finished_at,
+                total_sources,
+                successful_sources,
+                failed_sources,
+                notes,
+                metadata_payload,
+                metadata_payload,
+                batch_id,
+            ),
+        )
 
 
 def update_source_run(

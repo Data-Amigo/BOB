@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import importlib
+import os
 import sys
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import Any
 
@@ -22,6 +24,7 @@ from ganji_mtaani_agent.dashboard.data_access import (
     fetch_forebet_predictions,
     fetch_forebet_sport_options,
     fetch_forebet_summary,
+    fetch_latest_ingestion_batches,
     fetch_latest_source_runs,
     fetch_polymarket_category_options,
     fetch_polymarket_markets,
@@ -329,12 +332,65 @@ def safe_rows(loader, *args, **kwargs) -> list[Any]:
         return []
 
 
+def render_daily_ingestion_controls() -> None:
+    st.markdown("### Daily Ingestion")
+    st.caption("Run the current BoB daily ETL batch manually from the dashboard.")
+
+    with st.expander("Open ingestion controls", expanded=False):
+        c1, c2 = st.columns([1, 1.2])
+        batch_date = c1.date_input("Batch date", value=date.today(), key="daily_batch_date")
+        triggered_by = c2.text_input(
+            "Triggered by",
+            value="streamlit_manual",
+            key="daily_triggered_by",
+        )
+        if st.button("Run Daily Ingestion", key="run_daily_ingestion", use_container_width=True):
+            try:
+                os.environ.setdefault("PLAYWRIGHT_BROWSERS_PATH", "0")
+                etl_module = importlib.import_module("ganji_mtaani_agent.etl.daily_ingestion")
+                etl_module = importlib.reload(etl_module)
+                DailyIngestionConfig = etl_module.DailyIngestionConfig
+                run_daily_ingestion = etl_module.run_daily_ingestion
+            except Exception as exc:
+                st.error(f"Could not load the ingestion runner: {exc}")
+                return
+            with st.spinner("Running daily ingestion across all current sources..."):
+                summary = run_daily_ingestion(
+                    DailyIngestionConfig(
+                        batch_date=batch_date,
+                        triggered_by=triggered_by or "streamlit_manual",
+                    )
+                )
+            clear_all_caches()
+            st.session_state["last_daily_ingestion_summary"] = summary
+            st.success(
+                "Daily ingestion finished with status "
+                f"{summary['status']} for batch {summary['batch_id']}."
+            )
+
+    last_summary = st.session_state.get("last_daily_ingestion_summary")
+    if last_summary:
+        st.caption("Latest manual ingestion summary")
+        st.dataframe(
+            last_summary["outcomes"],
+            use_container_width=True,
+            hide_index=True,
+        )
+
+    if safe_table_exists("ingestion_batches"):
+        recent_batches = safe_rows(fetch_latest_ingestion_batches, limit=10)
+        if recent_batches:
+            st.caption("Recent ingestion batches")
+            st.dataframe(recent_batches, use_container_width=True, hide_index=True)
+
+
 # =============================================================================
 # Overview Page
 # =============================================================================
 def render_overview_page() -> None:
     st.subheader("Overview")
     st.caption("Pipeline health, storage readiness, and source coverage at a glance.")
+    render_daily_ingestion_controls()
 
     source_runs_ok  = safe_table_exists("source_runs")
     bookmaker_ok    = safe_table_exists("bookmaker_odds")

@@ -211,6 +211,7 @@ def insert_results_flow(args: argparse.Namespace) -> None:
             source_type="api",
             status="running",
             started_at=started_at,
+            batch_id=getattr(args, "batch_id", None),
             metadata_json={
                 "date": args.date,
                 "sport": args.sport,
@@ -277,6 +278,12 @@ def insert_results_flow(args: argparse.Namespace) -> None:
     print(f"run_id: {run_id}")
     print(f"inserted_results: {inserted_count}")
     print_results_preview(normalized_rows)
+    return {
+        "run_id": run_id,
+        "source_name": "thesportsdb",
+        "target_name": "results",
+        "records_found": inserted_count,
+    }
 
 
 # =============================================================================
@@ -304,6 +311,7 @@ def insert_bookmaker_flow(args: argparse.Namespace) -> None:
             source_type="browser",
             status="running",
             started_at=started_at,
+            batch_id=getattr(args, "batch_id", None),
             metadata_json={
                 "url": target.url,
                 "sport": target.sport,
@@ -388,6 +396,12 @@ def insert_bookmaker_flow(args: argparse.Namespace) -> None:
         for warning in result.warnings:
             print(f"- {warning}")
     print_bookmaker_preview(normalized_rows)
+    return {
+        "run_id": run_id,
+        "source_name": source.name,
+        "target_name": target.name,
+        "records_found": inserted_count,
+    }
 
 
 # =============================================================================
