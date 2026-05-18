@@ -525,6 +525,111 @@ def insert_forebet_predictions(
 
 
 # =============================================================================
+# Forebet Results Repository
+# =============================================================================
+def upsert_forebet_results(
+    connection: Connection,
+    *,
+    run_id: int,
+    rows: Sequence[Any],
+) -> int:
+    """Insert or update finished Forebet result rows."""
+
+    prepared_rows: list[tuple[Any, ...]] = []
+
+    for row in rows:
+        record = _as_record_dict(row)
+        prepared_rows.append(
+            (
+                run_id,
+                record.get("source"),
+                record.get("sport"),
+                record.get("league"),
+                record.get("home_team"),
+                record.get("away_team"),
+                record.get("event_datetime"),
+                record.get("prob_1"),
+                record.get("prob_x"),
+                record.get("prob_2"),
+                record.get("pred_outcome"),
+                record.get("predicted_home_score"),
+                record.get("predicted_away_score"),
+                record.get("predicted_score_text"),
+                record.get("actual_home_score"),
+                record.get("actual_away_score"),
+                record.get("actual_score_text"),
+                record.get("actual_outcome"),
+                record.get("status"),
+                record.get("pred_hit"),
+                record.get("pred_indicator_class"),
+                record.get("raw_text"),
+                record.get("confidence"),
+            )
+        )
+
+    if not prepared_rows:
+        return 0
+
+    with connection.cursor() as cursor:
+        cursor.executemany(
+            """
+            INSERT INTO forebet_results (
+                run_id,
+                source_name,
+                sport,
+                league,
+                home_team,
+                away_team,
+                event_datetime_text,
+                prob_1,
+                prob_x,
+                prob_2,
+                pred_outcome,
+                predicted_home_score,
+                predicted_away_score,
+                predicted_score_text,
+                actual_home_score,
+                actual_away_score,
+                actual_score_text,
+                actual_outcome,
+                status,
+                pred_hit,
+                pred_indicator_class,
+                raw_text,
+                confidence
+            )
+            VALUES (
+                %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
+            )
+            ON CONFLICT (source_name, sport, event_datetime_text, home_team, away_team)
+            DO UPDATE SET
+                run_id = EXCLUDED.run_id,
+                league = EXCLUDED.league,
+                prob_1 = EXCLUDED.prob_1,
+                prob_x = EXCLUDED.prob_x,
+                prob_2 = EXCLUDED.prob_2,
+                pred_outcome = EXCLUDED.pred_outcome,
+                predicted_home_score = EXCLUDED.predicted_home_score,
+                predicted_away_score = EXCLUDED.predicted_away_score,
+                predicted_score_text = EXCLUDED.predicted_score_text,
+                actual_home_score = EXCLUDED.actual_home_score,
+                actual_away_score = EXCLUDED.actual_away_score,
+                actual_score_text = EXCLUDED.actual_score_text,
+                actual_outcome = EXCLUDED.actual_outcome,
+                status = EXCLUDED.status,
+                pred_hit = EXCLUDED.pred_hit,
+                pred_indicator_class = EXCLUDED.pred_indicator_class,
+                raw_text = EXCLUDED.raw_text,
+                confidence = EXCLUDED.confidence
+            """,
+            prepared_rows,
+        )
+
+    return len(prepared_rows)
+
+
+# =============================================================================
 # Polymarket Market Repository
 # =============================================================================
 def upsert_polymarket_markets(

@@ -208,6 +208,65 @@ def fetch_sports_results_summary() -> list[dict[str, Any]]:
 
 
 @st.cache_data(ttl=300)
+def fetch_forebet_results_sport_options() -> list[str]:
+    rows = _fetch_all("SELECT DISTINCT sport FROM forebet_results ORDER BY sport")
+    return [str(row["sport"]) for row in rows if row.get("sport")]
+
+
+@st.cache_data(ttl=300)
+def fetch_forebet_results_status_options() -> list[str]:
+    rows = _fetch_all("SELECT DISTINCT status FROM forebet_results WHERE status IS NOT NULL ORDER BY status")
+    return [str(row["status"]) for row in rows if row.get("status")]
+
+
+@st.cache_data(ttl=120)
+def fetch_forebet_results(*, sport: str | None = None, status: str | None = None, event_date_text: str | None = None, search_text: str | None = None, limit: int = 500) -> list[dict[str, Any]]:
+    clauses = []
+    params: list[Any] = []
+    if sport:
+        clauses.append("sport = %s")
+        params.append(sport)
+    if status:
+        clauses.append("status = %s")
+        params.append(status)
+    if event_date_text:
+        clauses.append("event_datetime_text LIKE %s")
+        params.append(f"{event_date_text}%")
+    if search_text:
+        clauses.append("(home_team ILIKE %s OR away_team ILIKE %s OR league ILIKE %s)")
+        sv = f"%{search_text}%"
+        params.extend([sv, sv, sv])
+    where_sql = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+    params.append(limit)
+    return _fetch_all(
+        f"""
+        SELECT id, run_id, source_name, sport, league, home_team, away_team,
+               event_datetime_text, prob_1, prob_x, prob_2, pred_outcome,
+               predicted_home_score, predicted_away_score, predicted_score_text,
+               actual_home_score, actual_away_score, actual_score_text, actual_outcome,
+               status, pred_hit, pred_indicator_class, confidence, created_at
+        FROM forebet_results
+        {where_sql}
+        ORDER BY id DESC
+        LIMIT %s
+        """,
+        params,
+    )
+
+
+@st.cache_data(ttl=120)
+def fetch_forebet_results_summary() -> list[dict[str, Any]]:
+    return _fetch_all(
+        """
+        SELECT sport, status, COUNT(*) AS row_count, MAX(created_at) AS latest_created_at
+        FROM forebet_results
+        GROUP BY sport, status
+        ORDER BY sport, status
+        """
+    )
+
+
+@st.cache_data(ttl=300)
 def fetch_forebet_sport_options() -> list[str]:
     rows = _fetch_all("SELECT DISTINCT sport FROM forebet_predictions ORDER BY sport")
     return [str(row["sport"]) for row in rows if row.get("sport")]

@@ -74,14 +74,15 @@ def _score_confidence(product_name: str, description: str, benefits: list[str]) 
 # =============================================================================
 # Product Listing Parser
 # =============================================================================
-# PURPOSE: This function takes the HTML from a Jubilee products category page
-# (e.g. the health insurance listing) and returns URLs of individual product
-# detail pages. We then fetch each of those URLs separately and call
-# parse_product_page() on each one.
+# PURPOSE: Takes the HTML from a Jubilee category listing page (e.g. /ke/health/)
+# and returns the URLs of individual product detail pages. We fetch each URL
+# separately and call parse_product_page() on each one.
 #
-# SELECTOR STATUS: Placeholders — update after inspecting the HTML snapshot.
-# Run browser.py on the target URL, save the snapshot, open it, and find the
-# correct CSS selectors for product card links.
+# SELECTOR STATUS: Confirmed against snapshot 20260517_051757.html.
+# Page structure: div.card > div.content.p-4 > h3 (name) + p (teaser) + a.read-more (link).
+# Cards sit inside div.row.olddata (the full static set). The JS-rendered
+# div#datafetch duplicates the same links when a filter is active — de-duplication
+# by building a set is handled by the `if href not in urls` guard.
 def parse_product_listing(html: str, base_url: str) -> list[str]:
     """Extract individual product URLs from a Jubilee category listing page.
 
@@ -95,11 +96,7 @@ def parse_product_listing(html: str, base_url: str) -> list[str]:
     soup = BeautifulSoup(html, "html.parser")
     urls: list[str] = []
 
-    # TODO: Replace with the real selector after HTML inspection.
-    # Look for anchor tags on product card components.
-    # Common patterns on insurance sites: <a class="product-card__cta">,
-    # <a class="learn-more">, <a href="/products/...">.
-    for link in soup.select("a[href*='/product'], a[href*='/cover'], a[href*='/plan']"):
+    for link in soup.select("a.read-more"):
         href = str(link.get("href", "")).strip()
         if not href or href.startswith("#") or href.startswith("mailto"):
             continue

@@ -19,6 +19,10 @@ from ganji_mtaani_agent.dashboard.data_access import (
     fetch_bookmaker_league_options,
     fetch_bookmaker_odds,
     fetch_bookmaker_source_options,
+    fetch_forebet_results,
+    fetch_forebet_results_sport_options,
+    fetch_forebet_results_status_options,
+    fetch_forebet_results_summary,
     fetch_bookmaker_summary,
     fetch_forebet_league_options,
     fetch_forebet_predictions,
@@ -55,6 +59,7 @@ SOURCE_FAMILY_CATALOG = [
     {"source_name": "sportpesa",   "display_name": "SportPesa",   "role": "Bookmaker odds",       "table_name": "bookmaker_odds"},
     {"source_name": "mozzart",     "display_name": "Mozzart",     "role": "Bookmaker odds",       "table_name": "bookmaker_odds"},
     {"source_name": "forebet",     "display_name": "Forebet",     "role": "Predictions",          "table_name": "forebet_predictions"},
+    {"source_name": "forebet_results", "display_name": "Forebet Results", "role": "Finished results", "table_name": "forebet_results"},
     {"source_name": "polymarket",  "display_name": "Polymarket",  "role": "Prediction markets",   "table_name": "polymarket_markets"},
     {"source_name": "thesportsdb", "display_name": "TheSportsDB", "role": "Results & enrichment", "table_name": "sports_results"},
 ]
@@ -337,6 +342,22 @@ def render_daily_ingestion_controls() -> None:
     st.caption("Run the current BoB daily ETL batch manually from the dashboard.")
 
     with st.expander("Open ingestion controls", expanded=False):
+        try:
+            os.environ.setdefault("PLAYWRIGHT_BROWSERS_PATH", "0")
+            etl_module = importlib.import_module("ganji_mtaani_agent.etl.daily_ingestion")
+            etl_module = importlib.reload(etl_module)
+            DailyIngestionConfig = etl_module.DailyIngestionConfig
+            run_daily_ingestion = etl_module.run_daily_ingestion
+            get_daily_task_catalog = etl_module.get_daily_task_catalog
+            task_catalog = get_daily_task_catalog()
+        except Exception as exc:
+            st.error(f"Could not load the ingestion runner: {exc}")
+            return
+
+        task_name_to_label = {row["task_name"]: row["display_name"] for row in task_catalog}
+        all_task_names = list(task_name_to_label)
+        default_task_names = st.session_state.get("daily_selected_tasks", all_task_names)
+
         c1, c2 = st.columns([1, 1.2])
         batch_date = c1.date_input("Batch date", value=date.today(), key="daily_batch_date")
         triggered_by = c2.text_input(
@@ -344,21 +365,24 @@ def render_daily_ingestion_controls() -> None:
             value="streamlit_manual",
             key="daily_triggered_by",
         )
+        selected_task_names = st.multiselect(
+            "Tasks to run",
+            options=all_task_names,
+            default=default_task_names,
+            format_func=lambda task_name: task_name_to_label.get(task_name, task_name),
+            key="daily_selected_tasks",
+            help="Leave all selected for a full run, or pick only the tasks you want to rerun.",
+        )
         if st.button("Run Daily Ingestion", key="run_daily_ingestion", use_container_width=True):
-            try:
-                os.environ.setdefault("PLAYWRIGHT_BROWSERS_PATH", "0")
-                etl_module = importlib.import_module("ganji_mtaani_agent.etl.daily_ingestion")
-                etl_module = importlib.reload(etl_module)
-                DailyIngestionConfig = etl_module.DailyIngestionConfig
-                run_daily_ingestion = etl_module.run_daily_ingestion
-            except Exception as exc:
-                st.error(f"Could not load the ingestion runner: {exc}")
+            if not selected_task_names:
+                st.warning("Select at least one ingestion task before running the batch.")
                 return
-            with st.spinner("Running daily ingestion across all current sources..."):
+            with st.spinner("Running selected BoB ingestion tasks..."):
                 summary = run_daily_ingestion(
                     DailyIngestionConfig(
                         batch_date=batch_date,
                         triggered_by=triggered_by or "streamlit_manual",
+                        selected_tasks=tuple(selected_task_names),
                     )
                 )
             clear_all_caches()
@@ -392,29 +416,32 @@ def render_overview_page() -> None:
     st.caption("Pipeline health, storage readiness, and source coverage at a glance.")
     render_daily_ingestion_controls()
 
-    source_runs_ok  = safe_table_exists("source_runs")
-    bookmaker_ok    = safe_table_exists("bookmaker_odds")
-    results_ok      = safe_table_exists("sports_results")
-    forebet_ok      = safe_table_exists("forebet_predictions")
-    polymarket_ok   = safe_table_exists("polymarket_markets")
+    source_runs_ok     = safe_table_exists("source_runs")
+    bookmaker_ok       = safe_table_exists("bookmaker_odds")
+    results_ok         = safe_table_exists("sports_results")
+    forebet_results_ok = safe_table_exists("forebet_results")
+    forebet_ok         = safe_table_exists("forebet_predictions")
+    polymarket_ok      = safe_table_exists("polymarket_markets")
 
     run_summary       = safe_rows(fetch_source_run_summary)      if source_runs_ok else []
     latest_runs       = safe_rows(fetch_latest_source_runs, limit=12) if source_runs_ok else []
-    bookmaker_summary = safe_rows(fetch_bookmaker_summary)       if bookmaker_ok   else []
-    results_summary   = safe_rows(fetch_sports_results_summary)  if results_ok     else []
-    forebet_summary   = safe_rows(fetch_forebet_summary)         if forebet_ok     else []
-    polymarket_summary= safe_rows(fetch_polymarket_summary)      if polymarket_ok  else []
-    table_inventory   = safe_rows(fetch_table_inventory)
+    bookmaker_summary      = safe_rows(fetch_bookmaker_summary)       if bookmaker_ok       else []
+    results_summary        = safe_rows(fetch_sports_results_summary)  if results_ok         else []
+    forebet_results_summary = safe_rows(fetch_forebet_results_summary) if forebet_results_ok else []
+    forebet_summary        = safe_rows(fetch_forebet_summary)         if forebet_ok         else []
+    polymarket_summary     = safe_rows(fetch_polymarket_summary)      if polymarket_ok      else []
+    table_inventory        = safe_rows(fetch_table_inventory)
 
     total_runs      = sum(int(r.get("total_runs",     0)) for r in run_summary)
     successful_runs = sum(int(r.get("successful_runs",0)) for r in run_summary)
     failed_runs     = sum(int(r.get("failed_runs",    0)) for r in run_summary)
-    bookmaker_rows  = sum(int(r.get("row_count",      0)) for r in bookmaker_summary)
-    forebet_rows    = sum(int(r.get("row_count",      0)) for r in forebet_summary)
-    polymarket_rows = sum(int(r.get("row_count",      0)) for r in polymarket_summary)
+    bookmaker_rows      = sum(int(r.get("row_count", 0)) for r in bookmaker_summary)
+    forebet_result_rows = sum(int(r.get("row_count", 0)) for r in forebet_results_summary)
+    forebet_rows        = sum(int(r.get("row_count", 0)) for r in forebet_summary)
+    polymarket_rows     = sum(int(r.get("row_count", 0)) for r in polymarket_summary)
 
     # ── Metric row ──────────────────────────────────────────────────────────
-    m1, m2, m3, m4, m5, m6 = st.columns(6)
+    m1, m2, m3, m4, m5, m6, m7 = st.columns(7)
     m1.metric("Total Runs",      total_runs)
     m2.metric("Successful",      successful_runs)
     m3.metric("Failed",          failed_runs,
@@ -423,6 +450,7 @@ def render_overview_page() -> None:
     m4.metric("Bookmaker Rows",  bookmaker_rows)
     m5.metric("Forebet Rows",    forebet_rows)
     m6.metric("Polymarket Rows", polymarket_rows)
+    m7.metric("Forebet Results", forebet_result_rows)
 
     # ── Source coverage table ────────────────────────────────────────────────
     st.markdown("### Source Coverage")
@@ -522,6 +550,7 @@ def render_overview_page() -> None:
                 "latest_created_at": st.column_config.DatetimeColumn("Last Scraped"),
             }),
             ("Forebet rows · sport", forebet_summary, {}),
+            ("Forebet results · sport / status", forebet_results_summary, {}),
             ("Polymarket rows · category", polymarket_summary, {}),
             ("Results rows · sport / status", results_summary, {
                 "sport": "Sport", "status": "Status",
@@ -719,62 +748,114 @@ def render_polymarket_page() -> None:
 # =============================================================================
 def render_results_page() -> None:
     st.subheader("Sports Results")
-    st.caption("Ground-truth event schedule, status, and score view from TheSportsDB.")
+    st.caption("Ground-truth event schedule, status, and score view from TheSportsDB and Forebet results.")
 
-    if not safe_table_exists("sports_results"):
-        st.warning("The `sports_results` table does not exist yet.")
+    sports_results_ok = safe_table_exists("sports_results")
+    forebet_results_ok = safe_table_exists("forebet_results")
+
+    if not sports_results_ok and not forebet_results_ok:
+        st.warning("Neither `sports_results` nor `forebet_results` exists yet.")
         return
 
-    sport_options  = ["All"] + safe_rows(fetch_results_sport_options)
-    status_options = ["All"] + safe_rows(fetch_results_status_options)
+    result_source_options = ["TheSportsDB"] if sports_results_ok else []
+    if forebet_results_ok:
+        result_source_options.append("Forebet Results")
 
-    c1, c2, c3, c4, c5 = st.columns([1, 1, 1.2, 1.8, 0.8])
+    default_source = "Forebet Results" if forebet_results_ok else result_source_options[0]
+
+    c0, c1, c2, c3, c4, c5 = st.columns([1.2, 1, 1, 1.2, 1.8, 0.8])
+    sel_source = c0.selectbox("Result Source", options=result_source_options, index=result_source_options.index(default_source))
+
+    using_forebet_results = sel_source == "Forebet Results"
+
+    sport_options = ["All"] + safe_rows(fetch_forebet_results_sport_options if using_forebet_results else fetch_results_sport_options)
+    status_options = ["All"] + safe_rows(fetch_forebet_results_status_options if using_forebet_results else fetch_results_status_options)
+
     sel_sport   = c1.selectbox("Sport",  options=sport_options)
     sel_status  = c2.selectbox("Status", options=status_options)
     sel_date    = c3.date_input("Event date", value=None, help="Leave empty for all dates")
     search_text = c4.text_input("Search team, league, or event", value="")
     row_limit   = c5.number_input("Rows", min_value=10, max_value=1000, value=200, step=10, key="res_limit")
 
-    rows = safe_rows(
-        fetch_sports_results,
-        sport=None      if sel_sport  == "All" else sel_sport,
-        status=None     if sel_status == "All" else sel_status,
-        event_date=sel_date.isoformat() if sel_date else None,
-        search_text=search_text or None,
-        limit=int(row_limit),
-    )
+    if using_forebet_results:
+        rows = safe_rows(
+            fetch_forebet_results,
+            sport=None      if sel_sport  == "All" else sel_sport,
+            status=None     if sel_status == "All" else sel_status,
+            event_date_text=sel_date.strftime("%d/%m/%Y") if sel_date else None,
+            search_text=search_text or None,
+            limit=int(row_limit),
+        )
+    else:
+        rows = safe_rows(
+            fetch_sports_results,
+            sport=None      if sel_sport  == "All" else sel_sport,
+            status=None     if sel_status == "All" else sel_status,
+            event_date=sel_date.isoformat() if sel_date else None,
+            search_text=search_text or None,
+            limit=int(row_limit),
+        )
 
     st.metric("Matching Results", len(rows))
 
     if rows:
-        st.dataframe(
-            rows,
-            use_container_width=True,
-            hide_index=True,
-            column_config={
-                "id":          None,
-                "run_id":      None,
-                "source_name": "Source",
-                "sport":       "Sport",
-                "event_id":    "Event ID",
-                "league_id":   None,
-                "league":      "League",
-                "season":      "Season",
-                "event_name":  "Match",
-                "event_date":  st.column_config.DateColumn("Date"),
-                "event_time":  "Time",
-                "home_team":   "Home",
-                "away_team":   "Away",
-                "home_score":  st.column_config.NumberColumn("H", width="small"),
-                "away_score":  st.column_config.NumberColumn("A", width="small"),
-                "status":      "Status",
-                "progress":    "Progress",
-                "venue":       "Venue",
-                "winner":      "Winner",
-                "confidence":  st.column_config.NumberColumn("Conf", format="%.2f"),
-                "created_at":  None,
-            },
-        )
+        if using_forebet_results:
+            st.dataframe(
+                rows,
+                use_container_width=True,
+                hide_index=True,
+                column_config={
+                    "id":                   None,
+                    "run_id":               None,
+                    "source_name":          "Source",
+                    "sport":                "Sport",
+                    "league":               "League",
+                    "home_team":            "Home",
+                    "away_team":            "Away",
+                    "event_datetime_text":  "Match Time",
+                    "pred_outcome":         "Pred",
+                    "predicted_score_text": "Correct Score",
+                    "actual_score_text":    "Score",
+                    "actual_outcome":       "Actual",
+                    "status":               "Status",
+                    "pred_hit":             "Pred Hit",
+                    "pred_indicator_class": "Forebet Signal",
+                    "prob_1":               st.column_config.NumberColumn("P(1) %", format="%d"),
+                    "prob_x":               st.column_config.NumberColumn("P(X) %", format="%d"),
+                    "prob_2":               st.column_config.NumberColumn("P(2) %", format="%d"),
+                    "confidence":           st.column_config.NumberColumn("Conf", format="%.2f"),
+                    "created_at":           None,
+                },
+            )
+        else:
+            st.dataframe(
+                rows,
+                use_container_width=True,
+                hide_index=True,
+                column_config={
+                    "id":          None,
+                    "run_id":      None,
+                    "source_name": "Source",
+                    "sport":       "Sport",
+                    "event_id":    "Event ID",
+                    "league_id":   None,
+                    "league":      "League",
+                    "season":      "Season",
+                    "event_name":  "Match",
+                    "event_date":  st.column_config.DateColumn("Date"),
+                    "event_time":  "Time",
+                    "home_team":   "Home",
+                    "away_team":   "Away",
+                    "home_score":  st.column_config.NumberColumn("H", width="small"),
+                    "away_score":  st.column_config.NumberColumn("A", width="small"),
+                    "status":      "Status",
+                    "progress":    "Progress",
+                    "venue":       "Venue",
+                    "winner":      "Winner",
+                    "confidence":  st.column_config.NumberColumn("Conf", format="%.2f"),
+                    "created_at":  None,
+                },
+            )
     else:
         st.info("No results matched the current filters.")
 

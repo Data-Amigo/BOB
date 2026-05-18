@@ -32,6 +32,18 @@ FOREBET_BASKETBALL_TODAY_PATHS: tuple[str, ...] = (
     "/en/basketball/predictions-today",
 )
 
+# The yesterday football results page also has a by-league variant that widens
+# coverage without switching into unrelated market tabs. We keep this set
+# conservative until we validate more yesterday-specific subpages.
+FOREBET_FOOTBALL_YESTERDAY_PATHS: tuple[str, ...] = (
+    "/en/football-predictions-from-yesterday",
+    "/en/football-predictions-from-yesterday/by-league",
+)
+
+FOREBET_BASKETBALL_YESTERDAY_PATHS: tuple[str, ...] = (
+    "/en/basketball/predictions-yesterday",
+)
+
 
 def _to_absolute_forebet_url(path_or_url: str) -> str:
     """Return an absolute Forebet URL from either a path or a full URL."""
@@ -69,6 +81,14 @@ def build_forebet_collection_urls(target_name: str, primary_url: str | None = No
 
     if target_name == "basketball_today":
         urls.extend(_to_absolute_forebet_url(path) for path in FOREBET_BASKETBALL_TODAY_PATHS)
+        return _dedupe_urls(urls)
+
+    if target_name == "football_yesterday":
+        urls.extend(_to_absolute_forebet_url(path) for path in FOREBET_FOOTBALL_YESTERDAY_PATHS)
+        return _dedupe_urls(urls)
+
+    if target_name == "basketball_yesterday":
+        urls.extend(_to_absolute_forebet_url(path) for path in FOREBET_BASKETBALL_YESTERDAY_PATHS)
         return _dedupe_urls(urls)
 
     raise ValueError(f"No Forebet collection URL set is configured for target {target_name!r}.")

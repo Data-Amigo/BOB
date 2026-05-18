@@ -110,3 +110,64 @@ class ForebetFootballPrediction:
     remaining_tokens: list[str]
     raw_text: str
     confidence: float
+
+
+# =============================================================================
+# Forebet Basketball Result Model
+# =============================================================================
+@dataclass(slots=True)
+class ForebetBasketballResult:
+    """Structured finished basketball result row from Forebet yesterday pages."""
+
+    source: str
+    sport: str
+    league: str
+    home_team: str
+    away_team: str
+    event_datetime: str
+    prob_1: int | None
+    prob_2: int | None
+    pred_outcome: str | None
+    predicted_home_score: int | None
+    predicted_away_score: int | None
+    predicted_score_text: str | None
+    actual_home_score: int | None
+    actual_away_score: int | None
+    actual_score_text: str | None
+    actual_outcome: str | None
+    status: str | None
+    pred_hit: bool | None
+    pred_indicator_class: str | None
+    raw_text: str
+    confidence: float
+
+
+# =============================================================================
+# Forebet Football Result Model
+# =============================================================================
+@dataclass(slots=True)
+class ForebetFootballResult:
+    """Structured finished football result row from Forebet yesterday pages."""
+
+    source: str
+    sport: str
+    league: str
+    home_team: str
+    away_team: str
+    event_datetime: str
+    prob_1: int | None
+    prob_x: int | None
+    prob_2: int | None
+    pred_outcome: str | None
+    predicted_home_score: int | None
+    predicted_away_score: int | None
+    predicted_score_text: str | None
+    actual_home_score: int | None
+    actual_away_score: int | None
+    actual_score_text: str | None
+    actual_outcome: str | None
+    status: str | None
+    pred_hit: bool | None
+    pred_indicator_class: str | None
+    raw_text: str
+    confidence: float

@@ -14,7 +14,9 @@ from __future__ import annotations
 from bs4 import BeautifulSoup
 
 from ganji_mtaani_agent.models.forebet import (
+    ForebetBasketballResult,
     ForebetBasketballPrediction,
+    ForebetFootballResult,
     ForebetFootballPrediction,
 )
 
@@ -68,6 +70,19 @@ FOOTBALL_MINIMUM_EXPECTED_TOKENS = 18
 
 
 # =============================================================================
+# Yesterday Result Row Parsing Constants
+# =============================================================================
+FOOTBALL_RESULT_STATUS_INDEX = 21
+FOOTBALL_RESULT_ACTUAL_SCORE_INDEX = 22
+FOOTBALL_RESULT_MINIMUM_EXPECTED_TOKENS = 23
+
+BASKETBALL_RESULT_STATUS_INDEX = 24
+BASKETBALL_RESULT_ACTUAL_HOME_SCORE_INDEX = 25
+BASKETBALL_RESULT_ACTUAL_AWAY_SCORE_INDEX = 26
+BASKETBALL_RESULT_MINIMUM_EXPECTED_TOKENS = 27
+
+
+# =============================================================================
 # Small Conversion Helpers
 # =============================================================================
 # These helpers keep the row parser readable and protect it from bad values.
@@ -87,6 +102,52 @@ def _to_float(value: str) -> float | None:
         return float(value)
     except (TypeError, ValueError):
         return None
+
+
+def _parse_dash_score_text(score_text: str | None) -> tuple[int | None, int | None]:
+    """Parse a dash-delimited score string such as '1 - 0'."""
+
+    if not score_text:
+        return None, None
+
+    normalized = score_text.replace("(", "").replace(")", "").strip()
+    if "-" not in normalized:
+        return None, None
+
+    left, right = [part.strip() for part in normalized.split("-", maxsplit=1)]
+    return _to_int(left), _to_int(right)
+
+
+def _derive_pred_indicator_class(row) -> str | None:
+    """Extract Forebet's hit/miss CSS class from a row when present."""
+
+    for element in row.select("[class]"):
+        for class_name in element.get("class", []):
+            if class_name in {"predict_y", "predict_no"}:
+                return class_name
+    return None
+
+
+def _derive_hit_from_indicator(indicator_class: str | None) -> bool | None:
+    """Map Forebet CSS indicator class to a boolean hit flag."""
+
+    if indicator_class == "predict_y":
+        return True
+    if indicator_class == "predict_no":
+        return False
+    return None
+
+
+def _derive_outcome_from_scores(home_score: int | None, away_score: int | None, *, allow_draw: bool) -> str | None:
+    """Derive an outcome label from home and away scores."""
+
+    if home_score is None or away_score is None:
+        return None
+    if home_score > away_score:
+        return "1"
+    if away_score > home_score:
+        return "2"
+    return "X" if allow_draw else None
 
 
 # =============================================================================
@@ -188,6 +249,96 @@ def parse_football_row(row_text: str) -> ForebetFootballPrediction | None:
     )
 
 
+def parse_football_result_row(row) -> ForebetFootballResult | None:
+    """Parse one Forebet football yesterday row into a result model object."""
+
+    row_text = row.get_text(" | ", strip=True)
+    tokens = tokenize_football_row_text(row_text)
+    if len(tokens) < FOOTBALL_RESULT_MINIMUM_EXPECTED_TOKENS:
+        return None
+
+    indicator_class = _derive_pred_indicator_class(row)
+    actual_home_score, actual_away_score = _parse_dash_score_text(tokens[FOOTBALL_RESULT_ACTUAL_SCORE_INDEX])
+    actual_outcome = _derive_outcome_from_scores(actual_home_score, actual_away_score, allow_draw=True)
+    derived_pred_hit = None
+    if tokens[FOOTBALL_PRED_OUTCOME_INDEX] and actual_outcome:
+        derived_pred_hit = tokens[FOOTBALL_PRED_OUTCOME_INDEX] == actual_outcome
+
+    indicator_pred_hit = _derive_hit_from_indicator(indicator_class)
+    pred_hit = derived_pred_hit if derived_pred_hit is not None else indicator_pred_hit
+    confidence = 1.0 if pred_hit == indicator_pred_hit or indicator_pred_hit is None else 0.9
+
+    return ForebetFootballResult(
+        source="forebet",
+        sport="football",
+        league=tokens[FOOTBALL_LEAGUE_INDEX],
+        home_team=tokens[FOOTBALL_HOME_TEAM_INDEX],
+        away_team=tokens[FOOTBALL_AWAY_TEAM_INDEX],
+        event_datetime=tokens[FOOTBALL_EVENT_DATETIME_INDEX],
+        prob_1=_to_int(tokens[FOOTBALL_PROB_1_INDEX]),
+        prob_x=_to_int(tokens[FOOTBALL_PROB_X_INDEX]),
+        prob_2=_to_int(tokens[FOOTBALL_PROB_2_INDEX]),
+        pred_outcome=tokens[FOOTBALL_PRED_OUTCOME_INDEX],
+        predicted_home_score=_to_int(tokens[FOOTBALL_PREDICTED_HOME_SCORE_INDEX]),
+        predicted_away_score=_to_int(tokens[FOOTBALL_PREDICTED_AWAY_SCORE_INDEX]),
+        predicted_score_text=tokens[FOOTBALL_CORRECT_SCORE_TEXT_INDEX],
+        actual_home_score=actual_home_score,
+        actual_away_score=actual_away_score,
+        actual_score_text=tokens[FOOTBALL_RESULT_ACTUAL_SCORE_INDEX],
+        actual_outcome=actual_outcome,
+        status=tokens[FOOTBALL_RESULT_STATUS_INDEX],
+        pred_hit=pred_hit,
+        pred_indicator_class=indicator_class,
+        raw_text=row_text,
+        confidence=confidence,
+    )
+
+
+def parse_basketball_result_row(row) -> ForebetBasketballResult | None:
+    """Parse one Forebet basketball yesterday row into a result model object."""
+
+    row_text = row.get_text(" | ", strip=True)
+    tokens = tokenize_basketball_row_text(row_text)
+    if len(tokens) < BASKETBALL_RESULT_MINIMUM_EXPECTED_TOKENS:
+        return None
+
+    indicator_class = _derive_pred_indicator_class(row)
+    actual_home_score = _to_int(tokens[BASKETBALL_RESULT_ACTUAL_HOME_SCORE_INDEX])
+    actual_away_score = _to_int(tokens[BASKETBALL_RESULT_ACTUAL_AWAY_SCORE_INDEX])
+    actual_outcome = _derive_outcome_from_scores(actual_home_score, actual_away_score, allow_draw=False)
+    derived_pred_hit = None
+    if tokens[BASKETBALL_PRED_OUTCOME_INDEX] and actual_outcome:
+        derived_pred_hit = tokens[BASKETBALL_PRED_OUTCOME_INDEX] == actual_outcome
+
+    indicator_pred_hit = _derive_hit_from_indicator(indicator_class)
+    pred_hit = derived_pred_hit if derived_pred_hit is not None else indicator_pred_hit
+    confidence = 1.0 if pred_hit == indicator_pred_hit or indicator_pred_hit is None else 0.9
+
+    return ForebetBasketballResult(
+        source="forebet",
+        sport="basketball",
+        league=tokens[BASKETBALL_LEAGUE_INDEX],
+        home_team=tokens[BASKETBALL_HOME_TEAM_INDEX],
+        away_team=tokens[BASKETBALL_AWAY_TEAM_INDEX],
+        event_datetime=tokens[BASKETBALL_EVENT_DATETIME_INDEX],
+        prob_1=_to_int(tokens[BASKETBALL_PROB_1_INDEX]),
+        prob_2=_to_int(tokens[BASKETBALL_PROB_2_INDEX]),
+        pred_outcome=tokens[BASKETBALL_PRED_OUTCOME_INDEX],
+        predicted_home_score=_to_int(tokens[BASKETBALL_PREDICTED_HOME_SCORE_INDEX]),
+        predicted_away_score=_to_int(tokens[BASKETBALL_PREDICTED_AWAY_SCORE_INDEX]),
+        predicted_score_text=f"{tokens[10]} - {tokens[11]}" if len(tokens) > 11 else None,
+        actual_home_score=actual_home_score,
+        actual_away_score=actual_away_score,
+        actual_score_text=f"{tokens[BASKETBALL_RESULT_ACTUAL_HOME_SCORE_INDEX]} - {tokens[BASKETBALL_RESULT_ACTUAL_AWAY_SCORE_INDEX]}",
+        actual_outcome=actual_outcome,
+        status=tokens[BASKETBALL_RESULT_STATUS_INDEX],
+        pred_hit=pred_hit,
+        pred_indicator_class=indicator_class,
+        raw_text=row_text,
+        confidence=confidence,
+    )
+
+
 # =============================================================================
 # Basketball Snapshot Parser
 # =============================================================================
@@ -230,3 +381,39 @@ def parse_forebet_football(html: str) -> list[ForebetFootballPrediction]:
             predictions.append(parsed)
 
     return predictions
+
+
+def parse_forebet_football_yesterday(html: str) -> list[ForebetFootballResult]:
+    """Parse Forebet football results from the yesterday page HTML."""
+
+    soup = BeautifulSoup(html, "html.parser")
+    rows = soup.select("div.rcnt")
+    if not rows:
+        return []
+
+    results: list[ForebetFootballResult] = []
+
+    for row in rows:
+        parsed = parse_football_result_row(row)
+        if parsed is not None:
+            results.append(parsed)
+
+    return results
+
+
+def parse_forebet_basketball_yesterday(html: str) -> list[ForebetBasketballResult]:
+    """Parse Forebet basketball results from the yesterday page HTML."""
+
+    soup = BeautifulSoup(html, "html.parser")
+    rows = soup.select("div.rcnt")
+    if not rows:
+        return []
+
+    results: list[ForebetBasketballResult] = []
+
+    for row in rows:
+        parsed = parse_basketball_result_row(row)
+        if parsed is not None:
+            results.append(parsed)
+
+    return results

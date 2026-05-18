@@ -11,14 +11,19 @@ from psycopg import Connection
 
 from ganji_mtaani_agent.db import postgres as postgres_module
 from ganji_mtaani_agent.db import repositories as repositories_module
+from ganji_mtaani_agent.scrapers import forebet as forebet_scraper_module
 from ganji_mtaani_agent.models.polymarket_fetch import PolymarketFetchConfig
 from ganji_mtaani_agent.parsers.betika import parse_betika_basketball, parse_betika_football
-from ganji_mtaani_agent.parsers.forebet import parse_forebet_basketball, parse_forebet_football
+from ganji_mtaani_agent.parsers.forebet import (
+    parse_forebet_basketball,
+    parse_forebet_basketball_yesterday,
+    parse_forebet_football,
+    parse_forebet_football_yesterday,
+)
 from ganji_mtaani_agent.parsers.mozzart import parse_mozzart_basketball, parse_mozzart_football
 from ganji_mtaani_agent.parsers.sportpesa import parse_sportpesa_basketball, parse_sportpesa_football
 from ganji_mtaani_agent.parsers.thesportsdb import normalize_event_results
 from ganji_mtaani_agent.scrapers.browser import fetch_page
-from ganji_mtaani_agent.scrapers.forebet import build_forebet_collection_urls
 from ganji_mtaani_agent.scrapers.polymarket import fetch_polymarket_markets, fetch_polymarket_raw
 from ganji_mtaani_agent.scrapers.sources import get_source_config, get_source_target
 from ganji_mtaani_agent.scrapers.thesportsdb import fetch_events_day
@@ -26,6 +31,7 @@ from ganji_mtaani_agent.scrapers.thesportsdb import fetch_events_day
 
 postgres_module = importlib.reload(postgres_module)
 repositories_module = importlib.reload(repositories_module)
+forebet_scraper_module = importlib.reload(forebet_scraper_module)
 
 get_postgres_connection = postgres_module.get_postgres_connection
 insert_bookmaker_odds = repositories_module.insert_bookmaker_odds
@@ -34,8 +40,10 @@ insert_ingestion_batch = repositories_module.insert_ingestion_batch
 insert_source_run = repositories_module.insert_source_run
 update_ingestion_batch = repositories_module.update_ingestion_batch
 update_source_run = repositories_module.update_source_run
+upsert_forebet_results = repositories_module.upsert_forebet_results
 upsert_polymarket_markets = repositories_module.upsert_polymarket_markets
 upsert_sports_results = repositories_module.upsert_sports_results
+build_forebet_collection_urls = forebet_scraper_module.build_forebet_collection_urls
 
 
 BOOKMAKER_PARSERS: dict[tuple[str, str], Callable[[str], list[object]]] = {
@@ -52,6 +60,27 @@ FOREBET_PARSERS: dict[str, Callable[[str], list[object]]] = {
     "basketball_today": parse_forebet_basketball,
 }
 
+FOREBET_RESULTS_PARSERS: dict[str, Callable[[str], list[object]]] = {
+    "football_yesterday": parse_forebet_football_yesterday,
+    "basketball_yesterday": parse_forebet_basketball_yesterday,
+}
+
+DAILY_TASK_CATALOG: tuple[tuple[str, str], ...] = (
+    ("betika_football", "Betika · Football"),
+    ("betika_basketball", "Betika · Basketball"),
+    ("sportpesa_football", "SportPesa · Football"),
+    ("sportpesa_basketball", "SportPesa · Basketball"),
+    ("mozzart_football", "Mozzart · Football"),
+    ("mozzart_basketball", "Mozzart · Basketball"),
+    ("forebet_football", "Forebet · Football Predictions"),
+    ("forebet_basketball", "Forebet · Basketball Predictions"),
+    ("forebet_football_yesterday_results", "Forebet · Football Yesterday Results"),
+    ("forebet_basketball_yesterday_results", "Forebet · Basketball Yesterday Results"),
+    ("polymarket_markets", "Polymarket · Markets"),
+    ("results_soccer", "TheSportsDB · Soccer Results"),
+    ("results_basketball", "TheSportsDB · Basketball Results"),
+)
+
 
 @dataclass(frozen=True, slots=True)
 class DailyIngestionConfig:
@@ -65,6 +94,13 @@ class DailyIngestionConfig:
     results_days_back: int = 7
     results_days_forward: int = 3
     notes: str | None = None
+    selected_tasks: tuple[str, ...] | None = None
+
+
+def get_daily_task_catalog() -> list[dict[str, str]]:
+    """Return ordered task metadata for selective ingestion controls."""
+
+    return [{"task_name": task_name, "display_name": display_name} for task_name, display_name in DAILY_TASK_CATALOG]
 
 
 def _normalized_text(value: str | None) -> str:
@@ -100,6 +136,32 @@ def _dedupe_forebet_predictions(rows: list[object]) -> list[object]:
         deduped.values(),
         key=lambda row: (
             _normalized_text(getattr(row, "event_datetime", None)),
+            _normalized_text(getattr(row, "league", None)),
+            _normalized_text(getattr(row, "home_team", None)),
+            _normalized_text(getattr(row, "away_team", None)),
+        ),
+    )
+
+
+def _dedupe_forebet_results(rows: list[object]) -> list[object]:
+    """Deduplicate Forebet finished-result rows by fixture identity."""
+
+    deduped: dict[tuple[str, str, str, str, str], object] = {}
+
+    for row in rows:
+        key = (
+            _normalized_text(getattr(row, "sport", None)),
+            _normalized_text(getattr(row, "league", None)),
+            _normalized_text(getattr(row, "home_team", None)),
+            _normalized_text(getattr(row, "away_team", None)),
+            _normalized_text(getattr(row, "event_datetime_text", None)),
+        )
+        deduped.setdefault(key, row)
+
+    return sorted(
+        deduped.values(),
+        key=lambda row: (
+            _normalized_text(getattr(row, "event_datetime_text", None)),
             _normalized_text(getattr(row, "league", None)),
             _normalized_text(getattr(row, "home_team", None)),
             _normalized_text(getattr(row, "away_team", None)),
@@ -540,6 +602,144 @@ def _run_results_task(
         raise
 
 
+def _run_forebet_results_task(
+    connection: Connection,
+    *,
+    batch_id: int,
+    target_name: str,
+) -> dict[str, Any]:
+    source = get_source_config("forebet")
+    target = get_source_target(source, target_name)
+    collection_urls = build_forebet_collection_urls(target.name, target.url)
+    started_at = datetime.now(UTC)
+    timer_start = perf_counter()
+    run_id = insert_source_run(
+        connection,
+        batch_id=batch_id,
+        source_name=source.name,
+        target_name=target.name,
+        source_type="browser",
+        status="running",
+        started_at=started_at,
+        metadata_json={
+            "url": target.url,
+            "collection_urls": collection_urls,
+            "sport": target.sport,
+            "headless": source.default_headless,
+            "settle_ms": source.default_settle_ms,
+            "result_scope": "yesterday_finished",
+        },
+    )
+
+    try:
+        parser_fn = FOREBET_RESULTS_PARSERS[target.name]
+        page_summaries: list[dict[str, Any]] = []
+        collected_rows: list[object] = []
+        failed_urls: list[dict[str, str]] = []
+        total_warning_count = 0
+
+        for url in collection_urls:
+            result = fetch_page(
+                url,
+                timeout_ms=60_000,
+                wait_until=source.default_wait_until,
+                settle_ms=source.default_settle_ms,
+                headless=source.default_headless,
+            )
+            total_warning_count += len(result.warnings)
+
+            if result.error:
+                failed_urls.append({"url": url, "error": result.error})
+                page_summaries.append({"url": url, "status": "failed", "error": result.error})
+                continue
+
+            parsed_rows = parser_fn(result.html)
+            collected_rows.extend(parsed_rows)
+            page_summaries.append(
+                {
+                    "url": url,
+                    "status": "success",
+                    "title": result.title,
+                    "html_length": result.html_length,
+                    "parsed_rows": len(parsed_rows),
+                    "warnings": result.warnings,
+                }
+            )
+
+        if not collected_rows:
+            raise RuntimeError("Forebet yesterday collection returned no parseable rows across all configured URLs.")
+
+        normalized_rows = _dedupe_forebet_results(collected_rows)
+        inserted_count = upsert_forebet_results(connection, run_id=run_id, rows=normalized_rows)
+        _finalize_source_run(
+            connection,
+            run_id,
+            status="success",
+            started_counter=timer_start,
+            records_found=inserted_count,
+            warnings_count=total_warning_count + len(failed_urls),
+            metadata_json={
+                "url": target.url,
+                "collection_urls": collection_urls,
+                "sport": target.sport,
+                "raw_rows_collected": len(collected_rows),
+                "unique_rows_collected": len(normalized_rows),
+                "inserted_count": inserted_count,
+                "failed_urls": failed_urls,
+                "page_summaries": page_summaries,
+                "result_scope": "yesterday_finished",
+            },
+        )
+        return {
+            "source_name": source.name,
+            "target_name": target.name,
+            "status": "success",
+            "records_found": inserted_count,
+            "run_id": run_id,
+        }
+    except Exception as exc:
+        _finalize_source_run(
+            connection,
+            run_id,
+            status="failed",
+            started_counter=timer_start,
+            warnings_count=0,
+            error_message=str(exc),
+            metadata_json={
+                "url": target.url,
+                "collection_urls": collection_urls,
+                "sport": target.sport,
+                "result_scope": "yesterday_finished",
+            },
+        )
+        raise
+
+
+def build_daily_task_specs(
+    connection: Connection,
+    *,
+    batch_id: int,
+    config: DailyIngestionConfig,
+) -> list[tuple[str, Callable[[], dict[str, Any]]]]:
+    """Return the ordered daily ingestion task list."""
+
+    return [
+        ("betika_football", lambda: _run_bookmaker_task(connection, batch_id=batch_id, source_name="betika", target_name="football_today", limit=config.bookmaker_limit)),
+        ("betika_basketball", lambda: _run_bookmaker_task(connection, batch_id=batch_id, source_name="betika", target_name="basketball_today", limit=config.bookmaker_limit)),
+        ("sportpesa_football", lambda: _run_bookmaker_task(connection, batch_id=batch_id, source_name="sportpesa", target_name="football_today", limit=config.bookmaker_limit)),
+        ("sportpesa_basketball", lambda: _run_bookmaker_task(connection, batch_id=batch_id, source_name="sportpesa", target_name="basketball_today", limit=config.bookmaker_limit)),
+        ("mozzart_football", lambda: _run_bookmaker_task(connection, batch_id=batch_id, source_name="mozzart", target_name="football_today", limit=config.bookmaker_limit)),
+        ("mozzart_basketball", lambda: _run_bookmaker_task(connection, batch_id=batch_id, source_name="mozzart", target_name="basketball_today", limit=config.bookmaker_limit)),
+        ("forebet_football", lambda: _run_forebet_task(connection, batch_id=batch_id, target_name="football_today", limit=config.forebet_limit)),
+        ("forebet_basketball", lambda: _run_forebet_task(connection, batch_id=batch_id, target_name="basketball_today", limit=config.forebet_limit)),
+        ("forebet_football_yesterday_results", lambda: _run_forebet_results_task(connection, batch_id=batch_id, target_name="football_yesterday")),
+        ("forebet_basketball_yesterday_results", lambda: _run_forebet_results_task(connection, batch_id=batch_id, target_name="basketball_yesterday")),
+        ("polymarket_markets", lambda: _run_polymarket_task(connection, batch_id=batch_id, limit=config.polymarket_limit, scan_limit=config.polymarket_scan_limit)),
+        ("results_soccer", lambda: _run_results_task(connection, batch_id=batch_id, batch_date=config.batch_date, sport="Soccer", limit=config.results_limit, days_back=config.results_days_back, days_forward=config.results_days_forward)),
+        ("results_basketball", lambda: _run_results_task(connection, batch_id=batch_id, batch_date=config.batch_date, sport="Basketball", limit=config.results_limit, days_back=config.results_days_back, days_forward=config.results_days_forward)),
+    ]
+
+
 def run_daily_ingestion(config: DailyIngestionConfig) -> dict[str, Any]:
     """Run the current daily ingestion stack and return a batch summary."""
 
@@ -565,22 +765,14 @@ def run_daily_ingestion(config: DailyIngestionConfig) -> dict[str, Any]:
                 "results_limit": config.results_limit,
                 "results_days_back": config.results_days_back,
                 "results_days_forward": config.results_days_forward,
+                "selected_tasks": list(config.selected_tasks or ()),
             },
         )
 
-        tasks: list[tuple[str, Callable[[], dict[str, Any]]]] = [
-            ("betika_football", lambda: _run_bookmaker_task(connection, batch_id=batch_id, source_name="betika", target_name="football_today", limit=config.bookmaker_limit)),
-            ("betika_basketball", lambda: _run_bookmaker_task(connection, batch_id=batch_id, source_name="betika", target_name="basketball_today", limit=config.bookmaker_limit)),
-            ("sportpesa_football", lambda: _run_bookmaker_task(connection, batch_id=batch_id, source_name="sportpesa", target_name="football_today", limit=config.bookmaker_limit)),
-            ("sportpesa_basketball", lambda: _run_bookmaker_task(connection, batch_id=batch_id, source_name="sportpesa", target_name="basketball_today", limit=config.bookmaker_limit)),
-            ("mozzart_football", lambda: _run_bookmaker_task(connection, batch_id=batch_id, source_name="mozzart", target_name="football_today", limit=config.bookmaker_limit)),
-            ("mozzart_basketball", lambda: _run_bookmaker_task(connection, batch_id=batch_id, source_name="mozzart", target_name="basketball_today", limit=config.bookmaker_limit)),
-            ("forebet_football", lambda: _run_forebet_task(connection, batch_id=batch_id, target_name="football_today", limit=config.forebet_limit)),
-            ("forebet_basketball", lambda: _run_forebet_task(connection, batch_id=batch_id, target_name="basketball_today", limit=config.forebet_limit)),
-            ("polymarket_markets", lambda: _run_polymarket_task(connection, batch_id=batch_id, limit=config.polymarket_limit, scan_limit=config.polymarket_scan_limit)),
-            ("results_soccer", lambda: _run_results_task(connection, batch_id=batch_id, batch_date=config.batch_date, sport="Soccer", limit=config.results_limit, days_back=config.results_days_back, days_forward=config.results_days_forward)),
-            ("results_basketball", lambda: _run_results_task(connection, batch_id=batch_id, batch_date=config.batch_date, sport="Basketball", limit=config.results_limit, days_back=config.results_days_back, days_forward=config.results_days_forward)),
-        ]
+        tasks = build_daily_task_specs(connection, batch_id=batch_id, config=config)
+        if config.selected_tasks:
+            selected = set(config.selected_tasks)
+            tasks = [(task_name, task_fn) for task_name, task_fn in tasks if task_name in selected]
 
         for task_name, task_fn in tasks:
             try:
@@ -622,6 +814,7 @@ def run_daily_ingestion(config: DailyIngestionConfig) -> dict[str, Any]:
                 "results_limit": config.results_limit,
                 "results_days_back": config.results_days_back,
                 "results_days_forward": config.results_days_forward,
+                "selected_tasks": list(config.selected_tasks or ()),
                 "outcomes": outcomes,
             },
         )
