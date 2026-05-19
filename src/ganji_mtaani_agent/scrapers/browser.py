@@ -115,6 +115,11 @@ def fetch_page(
     wait_until: str = "domcontentloaded",
     settle_ms: int = 3_000,
     headless: bool = True,
+    click_selector_before_capture: str | None = None,
+    click_selector_max_times: int = 0,
+    click_text_before_capture: str | None = None,
+    click_text_max_times: int = 0,
+    click_wait_ms: int = 1_500,
     snapshot_path: str | Path | None = None,
     screenshot_path: str | Path | None = None,
 ) -> BrowserFetchResult:
@@ -129,6 +134,18 @@ def fetch_page(
         settle_ms: Extra milliseconds to wait after the initial load state.
             This gives JavaScript-heavy pages time to render useful content.
         headless: Whether to run the browser without a visible window.
+        click_selector_before_capture: Optional CSS selector to click
+            repeatedly before collecting HTML. This is preferred when the page
+            has multiple identical text labels and we need the precise control.
+        click_selector_max_times: Maximum number of repeated clicks to attempt
+            for click_selector_before_capture.
+        click_text_before_capture: Optional visible button/link text to click
+            repeatedly before collecting HTML. Useful for pages that lazy-load
+            more rows behind a simple "More" control.
+        click_text_max_times: Maximum number of repeated clicks to attempt for
+            click_text_before_capture.
+        click_wait_ms: Wait time after each successful click so the page can
+            render the newly loaded content before the next click attempt.
         snapshot_path: Optional path for saving the raw rendered HTML.
         screenshot_path: Optional path for saving a screenshot of the page.
 
@@ -167,6 +184,22 @@ def fetch_page(
             # have time to render useful content.
             if settle_ms > 0:
                 page.wait_for_timeout(settle_ms)
+
+            if click_selector_before_capture and click_selector_max_times > 0:
+                _click_selector_repeatedly(
+                    page,
+                    selector=click_selector_before_capture,
+                    max_times=click_selector_max_times,
+                    wait_ms=click_wait_ms,
+                )
+
+            if click_text_before_capture and click_text_max_times > 0:
+                _click_visible_text_repeatedly(
+                    page,
+                    text=click_text_before_capture,
+                    max_times=click_text_max_times,
+                    wait_ms=click_wait_ms,
+                )
 
             # After the page settles, collect basic browser evidence.
             title = page.title()
@@ -307,6 +340,46 @@ def _save_screenshot(screenshot_path: str | Path | None, page) -> str | None:
     path.parent.mkdir(parents=True, exist_ok=True)
     page.screenshot(path=str(path), full_page=True)
     return str(path)
+
+
+def _click_visible_text_repeatedly(page, *, text: str, max_times: int, wait_ms: int) -> None:
+    """Click a visible element with matching text until it disappears or maxes out."""
+
+    for _ in range(max_times):
+        locator = page.get_by_text(text, exact=True)
+        if locator.count() == 0:
+            break
+
+        target = locator.first
+        try:
+            if not target.is_visible():
+                break
+            target.scroll_into_view_if_needed(timeout=5_000)
+            target.click(timeout=5_000)
+            if wait_ms > 0:
+                page.wait_for_timeout(wait_ms)
+        except Exception:
+            break
+
+
+def _click_selector_repeatedly(page, *, selector: str, max_times: int, wait_ms: int) -> None:
+    """Click a CSS-selected element until it disappears or maxes out."""
+
+    for _ in range(max_times):
+        locator = page.locator(selector)
+        if locator.count() == 0:
+            break
+
+        target = locator.first
+        try:
+            if not target.is_visible():
+                break
+            target.scroll_into_view_if_needed(timeout=5_000)
+            target.click(timeout=5_000)
+            if wait_ms > 0:
+                page.wait_for_timeout(wait_ms)
+        except Exception:
+            break
 
 
 # =============================================================================

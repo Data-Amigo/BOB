@@ -88,8 +88,8 @@ class DailyIngestionConfig:
     triggered_by: str = "streamlit_manual"
     bookmaker_limit: int | None = None
     forebet_limit: int | None = None
-    polymarket_limit: int = 200
-    polymarket_scan_limit: int = 500
+    polymarket_limit: int = 500
+    polymarket_scan_limit: int = 2_000
     results_limit: int | None = None
     results_days_back: int = 7
     results_days_forward: int = 3
@@ -350,6 +350,9 @@ def _run_forebet_task(
                 wait_until=source.default_wait_until,
                 settle_ms=source.default_settle_ms,
                 headless=source.default_headless,
+                click_selector_before_capture="#mrows span",
+                click_selector_max_times=12 if target.name == "football_yesterday" else 6,
+                click_wait_ms=2_000,
             )
             total_warning_count += len(result.warnings)
 
