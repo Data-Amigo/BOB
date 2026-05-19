@@ -19,6 +19,10 @@ from ganji_mtaani_agent.dashboard.data_access import (
     fetch_bookmaker_league_options,
     fetch_bookmaker_odds,
     fetch_bookmaker_source_options,
+    fetch_flashscore_results,
+    fetch_flashscore_results_sport_options,
+    fetch_flashscore_results_status_options,
+    fetch_flashscore_results_summary,
     fetch_forebet_results,
     fetch_forebet_results_sport_options,
     fetch_forebet_results_status_options,
@@ -28,6 +32,11 @@ from ganji_mtaani_agent.dashboard.data_access import (
     fetch_forebet_predictions,
     fetch_forebet_sport_options,
     fetch_forebet_summary,
+    fetch_insurance_insurer_options,
+    fetch_insurance_product_detail,
+    fetch_insurance_products,
+    fetch_insurance_summary,
+    fetch_insurance_type_options,
     fetch_latest_ingestion_batches,
     fetch_latest_source_runs,
     fetch_polymarket_category_options,
@@ -53,6 +62,7 @@ PAGE_BOOKMAKER  = "🎰  Bookmaker Odds"
 PAGE_FOREBET    = "📈  Forebet Predictions"
 PAGE_POLYMARKET = "🌐  Polymarket Markets"
 PAGE_RESULTS    = "⚽  Sports Results"
+PAGE_INSURANCE  = "🏥  Insurance"
 
 SOURCE_FAMILY_CATALOG = [
     {"source_name": "betika",      "display_name": "Betika",      "role": "Bookmaker odds",       "table_name": "bookmaker_odds"},
@@ -60,8 +70,10 @@ SOURCE_FAMILY_CATALOG = [
     {"source_name": "mozzart",     "display_name": "Mozzart",     "role": "Bookmaker odds",       "table_name": "bookmaker_odds"},
     {"source_name": "forebet",     "display_name": "Forebet",     "role": "Predictions",          "table_name": "forebet_predictions"},
     {"source_name": "forebet_results", "display_name": "Forebet Results", "role": "Finished results", "table_name": "forebet_results"},
+    {"source_name": "flashscore",  "display_name": "Flashscore Results", "role": "Finished results", "table_name": "flashscore_results"},
     {"source_name": "polymarket",  "display_name": "Polymarket",  "role": "Prediction markets",   "table_name": "polymarket_markets"},
     {"source_name": "thesportsdb", "display_name": "TheSportsDB", "role": "Results & enrichment", "table_name": "sports_results"},
+    {"source_name": "jubilee",     "display_name": "Jubilee Insurance", "role": "Insurance products", "table_name": "insurance_products"},
 ]
 
 
@@ -299,7 +311,7 @@ def render_sidebar() -> str:
 
     page = st.sidebar.radio(
         "Navigate",
-        options=[PAGE_OVERVIEW, PAGE_BOOKMAKER, PAGE_FOREBET, PAGE_POLYMARKET, PAGE_RESULTS],
+        options=[PAGE_OVERVIEW, PAGE_BOOKMAKER, PAGE_FOREBET, PAGE_POLYMARKET, PAGE_RESULTS, PAGE_INSURANCE],
         label_visibility="collapsed",
     )
 
@@ -420,6 +432,7 @@ def render_overview_page() -> None:
     bookmaker_ok       = safe_table_exists("bookmaker_odds")
     results_ok         = safe_table_exists("sports_results")
     forebet_results_ok = safe_table_exists("forebet_results")
+    flashscore_results_ok = safe_table_exists("flashscore_results")
     forebet_ok         = safe_table_exists("forebet_predictions")
     polymarket_ok      = safe_table_exists("polymarket_markets")
 
@@ -428,6 +441,7 @@ def render_overview_page() -> None:
     bookmaker_summary      = safe_rows(fetch_bookmaker_summary)       if bookmaker_ok       else []
     results_summary        = safe_rows(fetch_sports_results_summary)  if results_ok         else []
     forebet_results_summary = safe_rows(fetch_forebet_results_summary) if forebet_results_ok else []
+    flashscore_results_summary = safe_rows(fetch_flashscore_results_summary) if flashscore_results_ok else []
     forebet_summary        = safe_rows(fetch_forebet_summary)         if forebet_ok         else []
     polymarket_summary     = safe_rows(fetch_polymarket_summary)      if polymarket_ok      else []
     table_inventory        = safe_rows(fetch_table_inventory)
@@ -437,11 +451,12 @@ def render_overview_page() -> None:
     failed_runs     = sum(int(r.get("failed_runs",    0)) for r in run_summary)
     bookmaker_rows      = sum(int(r.get("row_count", 0)) for r in bookmaker_summary)
     forebet_result_rows = sum(int(r.get("row_count", 0)) for r in forebet_results_summary)
+    flashscore_result_rows = sum(int(r.get("row_count", 0)) for r in flashscore_results_summary)
     forebet_rows        = sum(int(r.get("row_count", 0)) for r in forebet_summary)
     polymarket_rows     = sum(int(r.get("row_count", 0)) for r in polymarket_summary)
 
     # ── Metric row ──────────────────────────────────────────────────────────
-    m1, m2, m3, m4, m5, m6, m7 = st.columns(7)
+    m1, m2, m3, m4, m5, m6, m7, m8 = st.columns(8)
     m1.metric("Total Runs",      total_runs)
     m2.metric("Successful",      successful_runs)
     m3.metric("Failed",          failed_runs,
@@ -451,6 +466,7 @@ def render_overview_page() -> None:
     m5.metric("Forebet Rows",    forebet_rows)
     m6.metric("Polymarket Rows", polymarket_rows)
     m7.metric("Forebet Results", forebet_result_rows)
+    m8.metric("Flashscore Results", flashscore_result_rows)
 
     # ── Source coverage table ────────────────────────────────────────────────
     st.markdown("### Source Coverage")
@@ -551,6 +567,7 @@ def render_overview_page() -> None:
             }),
             ("Forebet rows · sport", forebet_summary, {}),
             ("Forebet results · sport / status", forebet_results_summary, {}),
+            ("Flashscore results · sport / status", flashscore_results_summary, {}),
             ("Polymarket rows · category", polymarket_summary, {}),
             ("Results rows · sport / status", results_summary, {
                 "sport": "Sport", "status": "Status",
@@ -748,28 +765,45 @@ def render_polymarket_page() -> None:
 # =============================================================================
 def render_results_page() -> None:
     st.subheader("Sports Results")
-    st.caption("Ground-truth event schedule, status, and score view from TheSportsDB and Forebet results.")
+    st.caption("Ground-truth event schedule, status, and score view from TheSportsDB, Forebet, and Flashscore results.")
 
     sports_results_ok = safe_table_exists("sports_results")
     forebet_results_ok = safe_table_exists("forebet_results")
+    flashscore_results_ok = safe_table_exists("flashscore_results")
 
-    if not sports_results_ok and not forebet_results_ok:
-        st.warning("Neither `sports_results` nor `forebet_results` exists yet.")
+    if not sports_results_ok and not forebet_results_ok and not flashscore_results_ok:
+        st.warning("None of `sports_results`, `forebet_results`, or `flashscore_results` exists yet.")
         return
 
     result_source_options = ["TheSportsDB"] if sports_results_ok else []
     if forebet_results_ok:
         result_source_options.append("Forebet Results")
+    if flashscore_results_ok:
+        result_source_options.append("Flashscore Results")
 
-    default_source = "Forebet Results" if forebet_results_ok else result_source_options[0]
+    if flashscore_results_ok:
+        default_source = "Flashscore Results"
+    elif forebet_results_ok:
+        default_source = "Forebet Results"
+    else:
+        default_source = result_source_options[0]
 
     c0, c1, c2, c3, c4, c5 = st.columns([1.2, 1, 1, 1.2, 1.8, 0.8])
     sel_source = c0.selectbox("Result Source", options=result_source_options, index=result_source_options.index(default_source))
 
     using_forebet_results = sel_source == "Forebet Results"
+    using_flashscore_results = sel_source == "Flashscore Results"
 
-    sport_options = ["All"] + safe_rows(fetch_forebet_results_sport_options if using_forebet_results else fetch_results_sport_options)
-    status_options = ["All"] + safe_rows(fetch_forebet_results_status_options if using_forebet_results else fetch_results_status_options)
+    sport_options = ["All"] + safe_rows(
+        fetch_forebet_results_sport_options if using_forebet_results
+        else fetch_flashscore_results_sport_options if using_flashscore_results
+        else fetch_results_sport_options
+    )
+    status_options = ["All"] + safe_rows(
+        fetch_forebet_results_status_options if using_forebet_results
+        else fetch_flashscore_results_status_options if using_flashscore_results
+        else fetch_results_status_options
+    )
 
     sel_sport   = c1.selectbox("Sport",  options=sport_options)
     sel_status  = c2.selectbox("Status", options=status_options)
@@ -783,6 +817,15 @@ def render_results_page() -> None:
             sport=None      if sel_sport  == "All" else sel_sport,
             status=None     if sel_status == "All" else sel_status,
             event_date_text=sel_date.strftime("%d/%m/%Y") if sel_date else None,
+            search_text=search_text or None,
+            limit=int(row_limit),
+        )
+    elif using_flashscore_results:
+        rows = safe_rows(
+            fetch_flashscore_results,
+            sport=None if sel_sport == "All" else sel_sport,
+            status=None if sel_status == "All" else sel_status,
+            page_date_text=sel_date.strftime("%d/%m") if sel_date else None,
             search_text=search_text or None,
             limit=int(row_limit),
         )
@@ -827,6 +870,29 @@ def render_results_page() -> None:
                     "created_at":           None,
                 },
             )
+        elif using_flashscore_results:
+            st.dataframe(
+                rows,
+                use_container_width=True,
+                hide_index=True,
+                column_config={
+                    "id":                None,
+                    "run_id":            None,
+                    "source_name":       "Source",
+                    "sport":             "Sport",
+                    "page_date_text":    "Page Date",
+                    "country_or_region": "Country / Region",
+                    "league":            "League",
+                    "match_status":      "Status",
+                    "event_time_text":   "Time",
+                    "home_team":         "Home",
+                    "away_team":         "Away",
+                    "home_score":        st.column_config.NumberColumn("H", width="small"),
+                    "away_score":        st.column_config.NumberColumn("A", width="small"),
+                    "confidence":        st.column_config.NumberColumn("Conf", format="%.2f"),
+                    "created_at":        None,
+                },
+            )
         else:
             st.dataframe(
                 rows,
@@ -861,6 +927,160 @@ def render_results_page() -> None:
 
 
 # =============================================================================
+# Insurance Products Page
+# =============================================================================
+def render_insurance_page() -> None:
+    st.subheader("Insurance Products")
+    st.caption("Kenyan insurance products scraped and structured for comparison.")
+
+    if not safe_table_exists("insurance_products"):
+        st.markdown(
+            """
+            <div class="pending-card">
+            The <code>insurance_products</code> table does not exist yet.<br><br>
+            Run the setup and scrape commands to populate it:<br>
+            <code>python scripts/create_insurance_schema.py</code><br>
+            <code>python scripts/scrape_insurance.py --source jubilee --target health --save-db</code>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+        return
+
+    summary   = safe_rows(fetch_insurance_summary)
+    insurer_opts = ["All"] + safe_rows(fetch_insurance_insurer_options)
+    type_opts    = ["All"] + safe_rows(fetch_insurance_type_options)
+
+    total_products = sum(int(r.get("product_count", 0)) for r in summary)
+    total_insurers = len({r["insurer_name"] for r in summary if r.get("insurer_name")})
+    total_types    = len({r["product_type"]  for r in summary if r.get("product_type")})
+
+    # ── Metrics ──────────────────────────────────────────────────────────────
+    m1, m2, m3 = st.columns(3)
+    m1.metric("Total Products", total_products)
+    m2.metric("Insurers",       total_insurers)
+    m3.metric("Product Types",  total_types)
+
+    # ── Filters ───────────────────────────────────────────────────────────────
+    c1, c2, c3 = st.columns([1, 1, 2])
+    sel_insurer = c1.selectbox("Insurer",   options=insurer_opts, key="ins_insurer")
+    sel_type    = c2.selectbox("Category",  options=type_opts,    key="ins_type")
+    search_text = c3.text_input("Search product name or description", value="", key="ins_search")
+
+    insurer_slug_map = {r["insurer_name"]: r.get("insurer_slug", r["insurer_name"].lower())
+                        for r in summary if r.get("insurer_name")}
+
+    rows = safe_rows(
+        fetch_insurance_products,
+        insurer_slug=insurer_slug_map.get(sel_insurer) if sel_insurer != "All" else None,
+        product_type=None if sel_type == "All" else sel_type,
+        search_text=search_text or None,
+    )
+
+    st.metric("Matching Products", len(rows))
+
+    if not rows:
+        st.info("No products matched the current filters.")
+        return
+
+    # ── Product table ─────────────────────────────────────────────────────────
+    st.markdown("### Product Catalogue")
+    st.dataframe(
+        rows,
+        use_container_width=True,
+        hide_index=True,
+        column_config={
+            "id":               st.column_config.NumberColumn("ID",        width="small"),
+            "insurer_name":     "Insurer",
+            "insurer_slug":     None,
+            "product_name":     st.column_config.TextColumn("Product",     width="large"),
+            "product_type":     "Category",
+            "tagline":          "Tagline",
+            "target_audience":  "Audience",
+            "premium_notes":    "Pricing",
+            "benefit_count":    st.column_config.NumberColumn("Benefits",  width="small"),
+            "waiting_period":   "Waiting Period",
+            "how_to_apply":     "How to Apply",
+            "contact_phone":    "Phone",
+            "contact_email":    "Email",
+            "confidence":       st.column_config.NumberColumn("Conf",      format="%.2f", width="small"),
+            "scraped_at":       st.column_config.DatetimeColumn("Scraped"),
+            "product_url":      st.column_config.LinkColumn("URL"),
+        },
+    )
+
+    # ── Product detail expander ───────────────────────────────────────────────
+    st.markdown("### Product Detail")
+    product_options = {f"{r['insurer_name']} — {r['product_name']}": r["id"] for r in rows}
+    selected_label  = st.selectbox("Select a product to view full details", options=list(product_options))
+
+    if selected_label:
+        detail = safe_rows(fetch_insurance_product_detail, product_options[selected_label])
+        if detail:
+            d = detail[0] if isinstance(detail, list) else detail
+            with st.expander(f"{d['product_name']}", expanded=True):
+                col_l, col_r = st.columns([1.6, 1])
+
+                with col_l:
+                    if d.get("tagline"):
+                        st.markdown(f"*{d['tagline']}*")
+                    if d.get("description"):
+                        st.markdown(d["description"])
+
+                    if d.get("key_benefits"):
+                        st.markdown("**Key Benefits**")
+                        for b in d["key_benefits"]:
+                            st.markdown(f"- {b}")
+
+                    if d.get("exclusions"):
+                        st.markdown("**Exclusions**")
+                        for e in d["exclusions"]:
+                            st.markdown(f"- {e}")
+
+                with col_r:
+                    info_rows = [
+                        ("Category",       d.get("product_type")),
+                        ("Target",         d.get("target_audience")),
+                        ("Pricing",        d.get("premium_notes")),
+                        ("Waiting Period", d.get("waiting_period")),
+                        ("How to Apply",   d.get("how_to_apply")),
+                        ("Phone",          d.get("contact_phone")),
+                        ("Email",          d.get("contact_email")),
+                        ("Min Age",        d.get("min_age")),
+                        ("Max Age",        d.get("max_age")),
+                        ("Confidence",     d.get("confidence")),
+                    ]
+                    for label, value in info_rows:
+                        if value is not None:
+                            st.markdown(f"**{label}:** {value}")
+
+                    if d.get("extra_data", {}).get("faqs"):
+                        faqs = d["extra_data"]["faqs"]
+                        st.markdown(f"**FAQs** ({len(faqs)} Q&A pairs)")
+                        for faq in faqs[:5]:
+                            with st.expander(faq.get("q", ""), expanded=False):
+                                st.write(faq.get("a", ""))
+                        if len(faqs) > 5:
+                            st.caption(f"… and {len(faqs) - 5} more FAQs in the database.")
+
+    # ── Summary breakdown ─────────────────────────────────────────────────────
+    if summary:
+        st.markdown("### Coverage Breakdown")
+        st.dataframe(
+            summary,
+            use_container_width=True,
+            hide_index=True,
+            column_config={
+                "insurer_name":   "Insurer",
+                "product_type":   "Category",
+                "product_count":  st.column_config.NumberColumn("Products"),
+                "avg_confidence": st.column_config.NumberColumn("Avg Conf", format="%.2f"),
+                "last_scraped":   st.column_config.DatetimeColumn("Last Scraped"),
+            },
+        )
+
+
+# =============================================================================
 # Entry Point
 # =============================================================================
 def main() -> None:
@@ -878,6 +1098,7 @@ def main() -> None:
     elif page == PAGE_FOREBET:    render_forebet_page()
     elif page == PAGE_POLYMARKET: render_polymarket_page()
     elif page == PAGE_RESULTS:    render_results_page()
+    elif page == PAGE_INSURANCE:  render_insurance_page()
     else:
         st.error(f"Unknown page: {page}")
 

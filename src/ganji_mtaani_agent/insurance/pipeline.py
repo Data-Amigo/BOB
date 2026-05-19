@@ -37,6 +37,8 @@ def scrape_source_target(
     delay_s: float = 2.0,
     headless: bool = True,
     verbose: bool = True,
+    listing_timeout_ms: int = 90_000,
+    listing_retries: int = 2,
 ) -> list[InsuranceProduct]:
     """Run the full scrape pipeline for one insurance source + target.
 
@@ -76,14 +78,23 @@ def scrape_source_target(
     _log(verbose, f"fetching listing: {target.url}")
 
     # -------------------------------------------------------------------------
-    # Step 1 — fetch the category listing page
+    # Step 1 - fetch the category listing page (with retries for slow sites)
     # -------------------------------------------------------------------------
-    listing = fetch_page(
-        target.url,
-        wait_until=source.default_wait_until,
-        settle_ms=source.default_settle_ms,
-        headless=headless,
-    )
+    listing = None
+    for attempt in range(1, listing_retries + 2):
+        timeout = listing_timeout_ms + (attempt - 1) * 30_000
+        listing = fetch_page(
+            target.url,
+            timeout_ms=timeout,
+            wait_until=source.default_wait_until,
+            settle_ms=source.default_settle_ms,
+            headless=headless,
+        )
+        if listing.ok:
+            break
+        if attempt <= listing_retries:
+            _log(verbose, f"listing fetch failed (attempt {attempt}), retrying in 5s...")
+            time.sleep(5)
 
     if not listing.ok:
         raise RuntimeError(f"Listing page fetch failed: {listing.error}")
@@ -132,7 +143,7 @@ def scrape_source_target(
         products.append(product)
         _log(verbose, f"[ok] {product.product_name}  confidence={product.confidence}")
 
-    _log(verbose, f"done — {len(products)}/{total} products parsed")
+    _log(verbose, f"done - {len(products)}/{total} products parsed")
     return products
 
 

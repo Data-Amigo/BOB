@@ -7,6 +7,7 @@ from typing import Any, Sequence
 from psycopg import Connection
 from psycopg.types.json import Jsonb
 
+from ganji_mtaani_agent.insurance.models.product import InsuranceProduct
 from ganji_mtaani_agent.models.thesportsdb import TheSportsDBEventResult
 
 
@@ -630,6 +631,81 @@ def upsert_forebet_results(
 
 
 # =============================================================================
+# Flashscore Results Repository
+# =============================================================================
+def upsert_flashscore_results(
+    connection: Connection,
+    *,
+    run_id: int,
+    rows: Sequence[Any],
+) -> int:
+    """Insert or update finished Flashscore result rows."""
+
+    prepared_rows: list[tuple[Any, ...]] = []
+
+    for row in rows:
+        record = _as_record_dict(row)
+        prepared_rows.append(
+            (
+                run_id,
+                record.get("source"),
+                record.get("sport"),
+                record.get("page_date_text"),
+                record.get("country_or_region"),
+                record.get("league"),
+                record.get("match_status"),
+                record.get("event_time_text"),
+                record.get("home_team"),
+                record.get("away_team"),
+                record.get("home_score"),
+                record.get("away_score"),
+                record.get("raw_text"),
+                record.get("confidence"),
+            )
+        )
+
+    if not prepared_rows:
+        return 0
+
+    with connection.cursor() as cursor:
+        cursor.executemany(
+            """
+            INSERT INTO flashscore_results (
+                run_id,
+                source_name,
+                sport,
+                page_date_text,
+                country_or_region,
+                league,
+                match_status,
+                event_time_text,
+                home_team,
+                away_team,
+                home_score,
+                away_score,
+                raw_text,
+                confidence
+            )
+            VALUES (
+                %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
+            )
+            ON CONFLICT (source_name, sport, page_date_text, league, home_team, away_team, event_time_text)
+            DO UPDATE SET
+                run_id = EXCLUDED.run_id,
+                country_or_region = EXCLUDED.country_or_region,
+                match_status = EXCLUDED.match_status,
+                home_score = EXCLUDED.home_score,
+                away_score = EXCLUDED.away_score,
+                raw_text = EXCLUDED.raw_text,
+                confidence = EXCLUDED.confidence
+            """,
+            prepared_rows,
+        )
+
+    return len(prepared_rows)
+
+
+# =============================================================================
 # Polymarket Market Repository
 # =============================================================================
 def upsert_polymarket_markets(
@@ -730,6 +806,120 @@ def upsert_polymarket_markets(
                 market_type = EXCLUDED.market_type,
                 raw_record_json = EXCLUDED.raw_record_json,
                 confidence = EXCLUDED.confidence
+            """,
+            prepared_rows,
+        )
+
+    return len(prepared_rows)
+
+
+# =============================================================================
+# Insurance Products Repository
+# =============================================================================
+def upsert_insurance_products(
+    connection: Connection,
+    products: Sequence[InsuranceProduct],
+) -> int:
+    """Insert or update insurance products scraped from an insurer's website.
+
+    Uses (insurer_slug, product_url) as the conflict key so re-running the
+    scraper refreshes existing products rather than inserting duplicates.
+
+    Returns the number of rows processed.
+    """
+    from datetime import UTC, datetime
+
+    if not products:
+        return 0
+
+    scraped_at = datetime.now(UTC)
+    prepared_rows: list[tuple[Any, ...]] = []
+
+    for p in products:
+        prepared_rows.append((
+            p.insurer_name,
+            p.insurer_slug,
+            p.product_name,
+            p.product_type,
+            p.product_url,
+            p.description,
+            p.tagline,
+            p.target_audience,
+            p.premium_min_kes,
+            p.premium_max_kes,
+            p.premium_frequency,
+            p.premium_notes,
+            p.coverage_min_kes,
+            p.coverage_max_kes,
+            p.coverage_notes,
+            p.min_age,
+            p.max_age,
+            p.eligibility_notes,
+            Jsonb(p.key_benefits),
+            Jsonb(p.exclusions),
+            p.waiting_period,
+            p.claims_process,
+            p.how_to_apply,
+            p.contact_phone,
+            p.contact_email,
+            Jsonb(p.extra_data),
+            p.raw_text,
+            p.confidence,
+            scraped_at,
+        ))
+
+    with connection.cursor() as cursor:
+        cursor.executemany(
+            """
+            INSERT INTO insurance_products (
+                insurer_name, insurer_slug, product_name, product_type, product_url,
+                description, tagline, target_audience,
+                premium_min_kes, premium_max_kes, premium_frequency, premium_notes,
+                coverage_min_kes, coverage_max_kes, coverage_notes,
+                min_age, max_age, eligibility_notes,
+                key_benefits, exclusions, waiting_period,
+                claims_process, how_to_apply,
+                contact_phone, contact_email,
+                extra_data, raw_text, confidence, scraped_at
+            )
+            VALUES (
+                %s, %s, %s, %s, %s,
+                %s, %s, %s,
+                %s, %s, %s, %s,
+                %s, %s, %s,
+                %s, %s, %s,
+                %s, %s, %s,
+                %s, %s,
+                %s, %s,
+                %s, %s, %s, %s
+            )
+            ON CONFLICT (insurer_slug, product_url)
+            DO UPDATE SET
+                product_name       = EXCLUDED.product_name,
+                description        = EXCLUDED.description,
+                tagline            = EXCLUDED.tagline,
+                target_audience    = EXCLUDED.target_audience,
+                premium_min_kes    = EXCLUDED.premium_min_kes,
+                premium_max_kes    = EXCLUDED.premium_max_kes,
+                premium_frequency  = EXCLUDED.premium_frequency,
+                premium_notes      = EXCLUDED.premium_notes,
+                coverage_min_kes   = EXCLUDED.coverage_min_kes,
+                coverage_max_kes   = EXCLUDED.coverage_max_kes,
+                coverage_notes     = EXCLUDED.coverage_notes,
+                min_age            = EXCLUDED.min_age,
+                max_age            = EXCLUDED.max_age,
+                eligibility_notes  = EXCLUDED.eligibility_notes,
+                key_benefits       = EXCLUDED.key_benefits,
+                exclusions         = EXCLUDED.exclusions,
+                waiting_period     = EXCLUDED.waiting_period,
+                claims_process     = EXCLUDED.claims_process,
+                how_to_apply       = EXCLUDED.how_to_apply,
+                contact_phone      = EXCLUDED.contact_phone,
+                contact_email      = EXCLUDED.contact_email,
+                extra_data         = EXCLUDED.extra_data,
+                raw_text           = EXCLUDED.raw_text,
+                confidence         = EXCLUDED.confidence,
+                scraped_at         = EXCLUDED.scraped_at
             """,
             prepared_rows,
         )

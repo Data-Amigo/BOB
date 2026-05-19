@@ -60,6 +60,11 @@ def main() -> None:
         metavar="FILE",
         help="Save parsed products to a JSON file instead of printing.",
     )
+    parser.add_argument(
+        "--save-db",
+        action="store_true",
+        help="Upsert parsed products into the insurance_products PostgreSQL table.",
+    )
     args = parser.parse_args()
 
     registered = get_registered_sources()
@@ -82,11 +87,19 @@ def main() -> None:
         print("[done] no products were parsed.")
         return
 
+    if args.save_db:
+        from ganji_mtaani_agent.db.postgres import get_postgres_connection
+        from ganji_mtaani_agent.db.repositories import upsert_insurance_products
+        with get_postgres_connection() as conn:
+            saved = upsert_insurance_products(conn, products)
+            conn.commit()
+        print(f"[db] {saved} products upserted into insurance_products.")
+
     if args.output_json:
         rows = [dataclasses.asdict(p) for p in products]
         args.output_json.parent.mkdir(parents=True, exist_ok=True)
         args.output_json.write_text(json.dumps(rows, indent=2, ensure_ascii=False), encoding="utf-8")
-        print(f"[output] {len(products)} products → {args.output_json}")
+        print(f"[output] {len(products)} products -> {args.output_json}")
     else:
         for product in products:
             print(f"\n{'-' * 60}")

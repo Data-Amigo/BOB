@@ -20,10 +20,12 @@ from ganji_mtaani_agent.parsers.forebet import (
     parse_forebet_football,
     parse_forebet_football_yesterday,
 )
+from ganji_mtaani_agent.parsers.flashscore import parse_flashscore_basketball, parse_flashscore_football
 from ganji_mtaani_agent.parsers.mozzart import parse_mozzart_basketball, parse_mozzart_football
 from ganji_mtaani_agent.parsers.sportpesa import parse_sportpesa_basketball, parse_sportpesa_football
 from ganji_mtaani_agent.parsers.thesportsdb import normalize_event_results
 from ganji_mtaani_agent.scrapers.browser import fetch_page
+from ganji_mtaani_agent.scrapers.flashscore import fetch_flashscore_scoreboard
 from ganji_mtaani_agent.scrapers.polymarket import fetch_polymarket_markets, fetch_polymarket_raw
 from ganji_mtaani_agent.scrapers.sources import get_source_config, get_source_target
 from ganji_mtaani_agent.scrapers.thesportsdb import fetch_events_day
@@ -41,6 +43,7 @@ insert_source_run = repositories_module.insert_source_run
 update_ingestion_batch = repositories_module.update_ingestion_batch
 update_source_run = repositories_module.update_source_run
 upsert_forebet_results = repositories_module.upsert_forebet_results
+upsert_flashscore_results = repositories_module.upsert_flashscore_results
 upsert_polymarket_markets = repositories_module.upsert_polymarket_markets
 upsert_sports_results = repositories_module.upsert_sports_results
 build_forebet_collection_urls = forebet_scraper_module.build_forebet_collection_urls
@@ -65,6 +68,11 @@ FOREBET_RESULTS_PARSERS: dict[str, Callable[[str], list[object]]] = {
     "basketball_yesterday": parse_forebet_basketball_yesterday,
 }
 
+FLASHSCORE_RESULTS_PARSERS: dict[str, Callable[[str], list[object]]] = {
+    "football_yesterday_results": parse_flashscore_football,
+    "basketball_yesterday_results": parse_flashscore_basketball,
+}
+
 DAILY_TASK_CATALOG: tuple[tuple[str, str], ...] = (
     ("betika_football", "Betika · Football"),
     ("betika_basketball", "Betika · Basketball"),
@@ -76,6 +84,8 @@ DAILY_TASK_CATALOG: tuple[tuple[str, str], ...] = (
     ("forebet_basketball", "Forebet · Basketball Predictions"),
     ("forebet_football_yesterday_results", "Forebet · Football Yesterday Results"),
     ("forebet_basketball_yesterday_results", "Forebet · Basketball Yesterday Results"),
+    ("flashscore_football_yesterday_results", "Flashscore · Football Yesterday Results"),
+    ("flashscore_basketball_yesterday_results", "Flashscore · Basketball Yesterday Results"),
     ("polymarket_markets", "Polymarket · Markets"),
     ("results_soccer", "TheSportsDB · Soccer Results"),
     ("results_basketball", "TheSportsDB · Basketball Results"),
@@ -93,6 +103,7 @@ class DailyIngestionConfig:
     results_limit: int | None = None
     results_days_back: int = 7
     results_days_forward: int = 3
+    flashscore_days_back: int = 1
     notes: str | None = None
     selected_tasks: tuple[str, ...] | None = None
 
@@ -718,6 +729,94 @@ def _run_forebet_results_task(
         raise
 
 
+def _run_flashscore_results_task(
+    connection: Connection,
+    *,
+    batch_id: int,
+    target_name: str,
+    days_back: int,
+) -> dict[str, Any]:
+    source = get_source_config("flashscore")
+    target = get_source_target(source, target_name)
+    started_at = datetime.now(UTC)
+    timer_start = perf_counter()
+    run_id = insert_source_run(
+        connection,
+        batch_id=batch_id,
+        source_name=source.name,
+        target_name=target.name,
+        source_type="browser",
+        status="running",
+        started_at=started_at,
+        metadata_json={
+            "url": target.url,
+            "sport": target.sport,
+            "days_back": days_back,
+            "finished_only": True,
+            "headless": source.default_headless,
+            "settle_ms": source.default_settle_ms,
+        },
+    )
+
+    try:
+        result = fetch_flashscore_scoreboard(
+            target.url,
+            days_back=days_back,
+            finished_only=True,
+            timeout_ms=60_000,
+            settle_ms=max(source.default_settle_ms, 12_000),
+            headless=source.default_headless,
+        )
+        if result.error:
+            raise RuntimeError(result.error)
+
+        parser_fn = FLASHSCORE_RESULTS_PARSERS[target.name]
+        normalized_rows = parser_fn(result.html)
+        inserted_count = upsert_flashscore_results(connection, run_id=run_id, rows=normalized_rows)
+        _finalize_source_run(
+            connection,
+            run_id,
+            status="success",
+            started_counter=timer_start,
+            records_found=inserted_count,
+            warnings_count=len(result.warnings),
+            metadata_json={
+                "url": target.url,
+                "sport": target.sport,
+                "days_back": days_back,
+                "finished_only": True,
+                "title": result.title,
+                "html_length": result.html_length,
+                "page_date_text": getattr(normalized_rows[0], "page_date_text", None) if normalized_rows else None,
+                "inserted_count": inserted_count,
+                "warnings": result.warnings,
+            },
+        )
+        return {
+            "source_name": source.name,
+            "target_name": target.name,
+            "status": "success",
+            "records_found": inserted_count,
+            "run_id": run_id,
+        }
+    except Exception as exc:
+        _finalize_source_run(
+            connection,
+            run_id,
+            status="failed",
+            started_counter=timer_start,
+            warnings_count=0,
+            error_message=str(exc),
+            metadata_json={
+                "url": target.url,
+                "sport": target.sport,
+                "days_back": days_back,
+                "finished_only": True,
+            },
+        )
+        raise
+
+
 def build_daily_task_specs(
     connection: Connection,
     *,
@@ -737,6 +836,8 @@ def build_daily_task_specs(
         ("forebet_basketball", lambda: _run_forebet_task(connection, batch_id=batch_id, target_name="basketball_today", limit=config.forebet_limit)),
         ("forebet_football_yesterday_results", lambda: _run_forebet_results_task(connection, batch_id=batch_id, target_name="football_yesterday")),
         ("forebet_basketball_yesterday_results", lambda: _run_forebet_results_task(connection, batch_id=batch_id, target_name="basketball_yesterday")),
+        ("flashscore_football_yesterday_results", lambda: _run_flashscore_results_task(connection, batch_id=batch_id, target_name="football_yesterday_results", days_back=config.flashscore_days_back)),
+        ("flashscore_basketball_yesterday_results", lambda: _run_flashscore_results_task(connection, batch_id=batch_id, target_name="basketball_yesterday_results", days_back=config.flashscore_days_back)),
         ("polymarket_markets", lambda: _run_polymarket_task(connection, batch_id=batch_id, limit=config.polymarket_limit, scan_limit=config.polymarket_scan_limit)),
         ("results_soccer", lambda: _run_results_task(connection, batch_id=batch_id, batch_date=config.batch_date, sport="Soccer", limit=config.results_limit, days_back=config.results_days_back, days_forward=config.results_days_forward)),
         ("results_basketball", lambda: _run_results_task(connection, batch_id=batch_id, batch_date=config.batch_date, sport="Basketball", limit=config.results_limit, days_back=config.results_days_back, days_forward=config.results_days_forward)),
@@ -768,6 +869,7 @@ def run_daily_ingestion(config: DailyIngestionConfig) -> dict[str, Any]:
                 "results_limit": config.results_limit,
                 "results_days_back": config.results_days_back,
                 "results_days_forward": config.results_days_forward,
+                "flashscore_days_back": config.flashscore_days_back,
                 "selected_tasks": list(config.selected_tasks or ()),
             },
         )
@@ -817,6 +919,7 @@ def run_daily_ingestion(config: DailyIngestionConfig) -> dict[str, Any]:
                 "results_limit": config.results_limit,
                 "results_days_back": config.results_days_back,
                 "results_days_forward": config.results_days_forward,
+                "flashscore_days_back": config.flashscore_days_back,
                 "selected_tasks": list(config.selected_tasks or ()),
                 "outcomes": outcomes,
             },

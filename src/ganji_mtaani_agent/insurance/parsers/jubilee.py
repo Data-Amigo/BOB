@@ -168,28 +168,52 @@ def parse_product_page(html: str, product_url: str, category: str) -> InsuranceP
     tagline = _clean(tagline_el.get_text()) if tagline_el else None
 
     # -------------------------------------------------------------------------
-    # Description — all <p> tags inside the main article content column.
-    # The right-hand column (.col-lg-4) is the callback form and is excluded
-    # by scoping to .col-lg-8.
+    # Description — primary selector targets health-style pages; falls back to
+    # .maisha-container for life pages that use a different layout.
     # -------------------------------------------------------------------------
-    desc_container = soup.select_one("article .col-lg-8 .col-12.mb-3")
+    desc_container = (
+        soup.select_one("article .col-lg-8 .col-12.mb-3")
+        or soup.select_one("article .col-lg-8 .maisha-container")
+    )
     if desc_container:
-        paragraphs = [_clean(p.get_text()) for p in desc_container.select("p")]
-        description = " ".join(p for p in paragraphs if p)
+        paragraphs = [
+            _clean(p.get_text())
+            for p in desc_container.select("p")
+            if _clean(p.get_text()) and len(_clean(p.get_text())) > 30
+        ]
+        description = " ".join(paragraphs)
     else:
         description = raw_text[:800]
 
     # -------------------------------------------------------------------------
-    # Target audience — paragraph containing "Who's It For?"
+    # Target audience — two layouts:
+    #   Health pages: "Who's It For?" inline heading
+    #   Life pages:   <p><strong>Plan is suitable for:</strong></p> + <ul>
     # -------------------------------------------------------------------------
+    target_audience: str | None = None
+
     who_match = re.search(r"Who'?s?\s+It\s+For\?\s*(.+?)(?:\s{2,}|$)", raw_text, re.IGNORECASE)
-    target_audience = _clean(who_match.group(1)) if who_match else None
+    if who_match:
+        target_audience = _clean(who_match.group(1))
+
+    if not target_audience:
+        suitable_el = soup.find(string=re.compile(r"Plan is suitable for", re.IGNORECASE))
+        if suitable_el:
+            # The text lives inside <strong> → <p>. Walk up to the nearest block
+            # element (<p> or <div>) so find_next_sibling("ul") sees the list.
+            block = suitable_el.find_parent(["p", "div", "li"])
+            ul_el = block.find_next_sibling("ul") if block else None
+            if ul_el:
+                items = [_clean(li.get_text()) for li in ul_el.select("li") if _clean(li.get_text())]
+                if items:
+                    target_audience = " | ".join(items)
 
     # -------------------------------------------------------------------------
-    # Key benefits — two sources, merged and deduplicated:
-    #   1. ◆ bullet points from the "Top Benefits:" paragraph (core insurance cover)
-    #   2. div.benefit-item labels from the carousel (wellness / value-add benefits)
-    # The carousel clones items for infinite-scroll, so a seen-set deduplicates.
+    # Key benefits — three sources, merged and deduplicated:
+    #   1. ◆ bullet points (health pages — "Top Benefits:" paragraph)
+    #   2. div.benefit-item p (health owl-carousel wellness add-ons)
+    #   3. .benefits-carousel .benefit-card (life Maisha-style pages)
+    #      Each card has a <p><strong>title</strong></p> + <ul><li> sub-items.
     # -------------------------------------------------------------------------
     benefits: list[str] = []
     seen: set[str] = set()
@@ -205,6 +229,16 @@ def parse_product_page(html: str, product_url: str, category: str) -> InsuranceP
         if text and len(text) > 5 and text not in seen:
             seen.add(text)
             benefits.append(text)
+
+    for card in soup.select(".benefits-carousel .benefit-card"):
+        title_el = card.select_one("p > strong")
+        sub_items = [_clean(li.get_text()) for li in card.select("ul > li") if _clean(li.get_text())]
+        if title_el:
+            title = _clean(title_el.get_text())
+            combined = f"{title}: {'; '.join(sub_items)}" if sub_items else title
+            if combined not in seen:
+                seen.add(combined)
+                benefits.append(combined)
 
     # -------------------------------------------------------------------------
     # Exclusions — not published on the web page; referenced in policy docs only
@@ -253,15 +287,37 @@ def parse_product_page(html: str, product_url: str, category: str) -> InsuranceP
             })
 
     # -------------------------------------------------------------------------
-    # Pricing — no public price table; Jubilee uses a quote-based model
+    # Pricing — look for "start/from KES X/month" first (life pages publish
+    # a minimum premium in their benefit cards); fall back to the first KES
+    # figure in the raw text for any other mention.
     # -------------------------------------------------------------------------
-    premium_min = _extract_kes_amount(raw_text)
+    premium_min: float | None = None
+    premium_frequency: str | None = None
+
+    monthly_match = re.search(
+        r"(?:start|from|as low as)\s+(?:KES|Ksh)\.?\s*([\d,]+)\s*(?:/\s*month|per\s*month)",
+        raw_text,
+        re.IGNORECASE,
+    )
+    if monthly_match:
+        premium_min = float(monthly_match.group(1).replace(",", ""))
+        premium_frequency = "monthly"
+    else:
+        premium_min = _extract_kes_amount(raw_text)
 
     # -------------------------------------------------------------------------
-    # Eligibility — regex over raw text
+    # Eligibility — two patterns:
+    #   "minimum age: 18" / "entry age: 18"      (health/life structured tables)
+    #   "aged 18 – 65 years"                      (life narrative text)
     # -------------------------------------------------------------------------
     min_age = _extract_age(raw_text, r"minimum age|min(?:imum)?\s*age|entry age")
     max_age = _extract_age(raw_text, r"maximum age|max(?:imum)?\s*age")
+
+    if min_age is None or max_age is None:
+        aged_match = re.search(r"aged\s+(\d+)\s*[-–]\s*(\d+)", raw_text, re.IGNORECASE)
+        if aged_match:
+            min_age = min_age or int(aged_match.group(1))
+            max_age = max_age or int(aged_match.group(2))
 
     # -------------------------------------------------------------------------
     # Contact details — regex over raw text
@@ -282,7 +338,7 @@ def parse_product_page(html: str, product_url: str, category: str) -> InsuranceP
         target_audience=target_audience,
         premium_min_kes=premium_min,
         premium_max_kes=None,
-        premium_frequency=None,
+        premium_frequency=premium_frequency,
         premium_notes="Quote-based — no public price table. Request a callback for pricing.",
         coverage_min_kes=None,
         coverage_max_kes=None,

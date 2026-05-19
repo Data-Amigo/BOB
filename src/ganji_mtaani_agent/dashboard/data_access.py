@@ -267,6 +267,63 @@ def fetch_forebet_results_summary() -> list[dict[str, Any]]:
 
 
 @st.cache_data(ttl=300)
+def fetch_flashscore_results_sport_options() -> list[str]:
+    rows = _fetch_all("SELECT DISTINCT sport FROM flashscore_results ORDER BY sport")
+    return [str(row["sport"]) for row in rows if row.get("sport")]
+
+
+@st.cache_data(ttl=300)
+def fetch_flashscore_results_status_options() -> list[str]:
+    rows = _fetch_all("SELECT DISTINCT match_status FROM flashscore_results WHERE match_status IS NOT NULL ORDER BY match_status")
+    return [str(row["match_status"]) for row in rows if row.get("match_status")]
+
+
+@st.cache_data(ttl=120)
+def fetch_flashscore_results(*, sport: str | None = None, status: str | None = None, page_date_text: str | None = None, search_text: str | None = None, limit: int = 500) -> list[dict[str, Any]]:
+    clauses = []
+    params: list[Any] = []
+    if sport:
+        clauses.append("sport = %s")
+        params.append(sport)
+    if status:
+        clauses.append("match_status = %s")
+        params.append(status)
+    if page_date_text:
+        clauses.append("page_date_text LIKE %s")
+        params.append(f"{page_date_text}%")
+    if search_text:
+        clauses.append("(home_team ILIKE %s OR away_team ILIKE %s OR league ILIKE %s OR country_or_region ILIKE %s)")
+        sv = f"%{search_text}%"
+        params.extend([sv, sv, sv, sv])
+    where_sql = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+    params.append(limit)
+    return _fetch_all(
+        f"""
+        SELECT id, run_id, source_name, sport, page_date_text, country_or_region, league,
+               match_status, event_time_text, home_team, away_team, home_score, away_score,
+               confidence, created_at
+        FROM flashscore_results
+        {where_sql}
+        ORDER BY id DESC
+        LIMIT %s
+        """,
+        params,
+    )
+
+
+@st.cache_data(ttl=120)
+def fetch_flashscore_results_summary() -> list[dict[str, Any]]:
+    return _fetch_all(
+        """
+        SELECT sport, match_status, COUNT(*) AS row_count, MAX(created_at) AS latest_created_at
+        FROM flashscore_results
+        GROUP BY sport, match_status
+        ORDER BY sport, match_status
+        """
+    )
+
+
+@st.cache_data(ttl=300)
 def fetch_forebet_sport_options() -> list[str]:
     rows = _fetch_all("SELECT DISTINCT sport FROM forebet_predictions ORDER BY sport")
     return [str(row["sport"]) for row in rows if row.get("sport")]
@@ -381,3 +438,94 @@ def fetch_polymarket_summary() -> list[dict[str, Any]]:
         ORDER BY category
         """
     )
+
+
+# =============================================================================
+# Insurance Products Data Access
+# =============================================================================
+@st.cache_data(ttl=300)
+def fetch_insurance_insurer_options() -> list[str]:
+    rows = _fetch_all("SELECT DISTINCT insurer_name FROM insurance_products ORDER BY insurer_name")
+    return [str(r["insurer_name"]) for r in rows if r.get("insurer_name")]
+
+
+@st.cache_data(ttl=300)
+def fetch_insurance_type_options() -> list[str]:
+    rows = _fetch_all("SELECT DISTINCT product_type FROM insurance_products ORDER BY product_type")
+    return [str(r["product_type"]) for r in rows if r.get("product_type")]
+
+
+@st.cache_data(ttl=120)
+def fetch_insurance_summary() -> list[dict[str, Any]]:
+    return _fetch_all(
+        """
+        SELECT insurer_name,
+               product_type,
+               COUNT(*)              AS product_count,
+               ROUND(AVG(confidence)::numeric, 2) AS avg_confidence,
+               MAX(scraped_at)       AS last_scraped
+        FROM insurance_products
+        GROUP BY insurer_name, product_type
+        ORDER BY insurer_name, product_type
+        """
+    )
+
+
+@st.cache_data(ttl=120)
+def fetch_insurance_products(
+    *,
+    insurer_slug: str | None = None,
+    product_type: str | None = None,
+    search_text: str | None = None,
+    limit: int = 200,
+) -> list[dict[str, Any]]:
+    clauses: list[str] = []
+    params: list[Any] = []
+    if insurer_slug:
+        clauses.append("insurer_slug = %s")
+        params.append(insurer_slug)
+    if product_type:
+        clauses.append("product_type = %s")
+        params.append(product_type)
+    if search_text:
+        clauses.append(
+            "(product_name ILIKE %s OR tagline ILIKE %s OR description ILIKE %s)"
+        )
+        sv = f"%{search_text}%"
+        params.extend([sv, sv, sv])
+    where_sql = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+    params.append(limit)
+    return _fetch_all(
+        f"""
+        SELECT id, insurer_name, insurer_slug, product_name, product_type,
+               tagline, target_audience, premium_notes,
+               jsonb_array_length(key_benefits) AS benefit_count,
+               waiting_period, how_to_apply,
+               contact_phone, contact_email,
+               confidence, scraped_at, product_url
+        FROM insurance_products
+        {where_sql}
+        ORDER BY insurer_name, product_type, product_name
+        LIMIT %s
+        """,
+        params,
+    )
+
+
+@st.cache_data(ttl=120)
+def fetch_insurance_product_detail(product_id: int) -> dict[str, Any] | None:
+    rows = _fetch_all(
+        """
+        SELECT id, insurer_name, product_name, product_type, product_url,
+               description, tagline, target_audience,
+               premium_min_kes, premium_max_kes, premium_frequency, premium_notes,
+               coverage_notes, min_age, max_age, eligibility_notes,
+               key_benefits, exclusions, waiting_period,
+               claims_process, how_to_apply, contact_phone, contact_email,
+               extra_data, confidence, scraped_at
+        FROM insurance_products
+        WHERE id = %s
+        """,
+        (product_id,),
+    )
+    return rows[0] if rows else None

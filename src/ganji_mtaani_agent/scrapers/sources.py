@@ -192,6 +192,45 @@ SOURCES: dict[str, SourceConfig] = {
             ),
         },
     ),
+    "flashscore": SourceConfig(
+        name="flashscore",
+        display_name="Flashscore",
+        default_target="basketball_today",
+        description="Live score and results source for broad football and basketball coverage.",
+        default_wait_until="domcontentloaded",
+        default_settle_ms=12_000,
+        default_headless=False,
+        targets={
+            "football_today": SourceTarget(
+                name="football_today",
+                display_name="Football Scores Today",
+                url="https://www.flashscore.co.ke/football/",
+                sport="football",
+                description="Flashscore football live scores, fixtures, and finished-match coverage.",
+            ),
+            "football_yesterday_results": SourceTarget(
+                name="football_yesterday_results",
+                display_name="Football Results Yesterday",
+                url="https://www.flashscore.co.ke/football/",
+                sport="football",
+                description="Flashscore football results board shifted to the previous day and filtered to finished matches.",
+            ),
+            "basketball_today": SourceTarget(
+                name="basketball_today",
+                display_name="Basketball Scores Today",
+                url="https://www.flashscore.co.ke/basketball/",
+                sport="basketball",
+                description="Flashscore basketball live scores, fixtures, and finished-game coverage.",
+            ),
+            "basketball_yesterday_results": SourceTarget(
+                name="basketball_yesterday_results",
+                display_name="Basketball Results Yesterday",
+                url="https://www.flashscore.co.ke/basketball/",
+                sport="basketball",
+                description="Flashscore basketball results board shifted to the previous day and filtered to finished games.",
+            ),
+        },
+    ),
 }
 
 
