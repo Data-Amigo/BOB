@@ -23,6 +23,8 @@ from ganji_mtaani_agent.dashboard.data_access import (
     fetch_flashscore_results_sport_options,
     fetch_flashscore_results_status_options,
     fetch_flashscore_results_summary,
+    fetch_forebet_match_analyses,
+    fetch_forebet_match_history_rows,
     fetch_forebet_results,
     fetch_forebet_results_sport_options,
     fetch_forebet_results_status_options,
@@ -62,6 +64,7 @@ PAGE_BOOKMAKER  = "🎰  Bookmaker Odds"
 PAGE_FOREBET    = "📈  Forebet Predictions"
 PAGE_POLYMARKET = "🌐  Polymarket Markets"
 PAGE_RESULTS    = "⚽  Sports Results"
+PAGE_HISTORY    = "📚  Historical Analysis"
 PAGE_INSURANCE  = "🏥  Insurance"
 
 SOURCE_FAMILY_CATALOG = [
@@ -70,6 +73,7 @@ SOURCE_FAMILY_CATALOG = [
     {"source_name": "mozzart",     "display_name": "Mozzart",     "role": "Bookmaker odds",       "table_name": "bookmaker_odds"},
     {"source_name": "forebet",     "display_name": "Forebet",     "role": "Predictions",          "table_name": "forebet_predictions"},
     {"source_name": "forebet_results", "display_name": "Forebet Results", "role": "Finished results", "table_name": "forebet_results"},
+    {"source_name": "forebet_history", "display_name": "Forebet History", "role": "Historical analysis", "table_name": "forebet_match_analyses"},
     {"source_name": "flashscore",  "display_name": "Flashscore Results", "role": "Finished results", "table_name": "flashscore_results"},
     {"source_name": "polymarket",  "display_name": "Polymarket",  "role": "Prediction markets",   "table_name": "polymarket_markets"},
     {"source_name": "thesportsdb", "display_name": "TheSportsDB", "role": "Results & enrichment", "table_name": "sports_results"},
@@ -311,7 +315,7 @@ def render_sidebar() -> str:
 
     page = st.sidebar.radio(
         "Navigate",
-        options=[PAGE_OVERVIEW, PAGE_BOOKMAKER, PAGE_FOREBET, PAGE_POLYMARKET, PAGE_RESULTS, PAGE_INSURANCE],
+        options=[PAGE_OVERVIEW, PAGE_BOOKMAKER, PAGE_FOREBET, PAGE_POLYMARKET, PAGE_RESULTS, PAGE_HISTORY, PAGE_INSURANCE],
         label_visibility="collapsed",
     )
 
@@ -927,6 +931,181 @@ def render_results_page() -> None:
 
 
 # =============================================================================
+# Historical Analysis Page
+# =============================================================================
+def render_historical_page() -> None:
+    st.subheader("Historical Analysis")
+    st.caption("Analyze a Forebet match detail page and store recent-form and opponent history for modelling.")
+
+    analyses_table_ok = safe_table_exists("forebet_match_analyses")
+    history_table_ok = safe_table_exists("forebet_match_history_rows")
+
+    if not analyses_table_ok or not history_table_ok:
+        st.warning("Historical analysis tables are not available yet. Apply the Phase 6 schema first.")
+        return
+
+    default_url = st.session_state.get("historical_match_url", "")
+    c1, c2 = st.columns([2.4, 0.8])
+    match_url = c1.text_input(
+        "Forebet match URL",
+        value=default_url,
+        placeholder="https://www.forebet.com/en/football/matches/...",
+        key="historical_match_url_input",
+    )
+    selected_sport = c2.selectbox("Sport", options=["auto", "football", "basketball"], key="historical_sport")
+
+    if st.button("Analyze Forebet Match", use_container_width=True, key="analyze_forebet_match"):
+        if not match_url.strip():
+            st.warning("Paste a Forebet football or basketball match URL first.")
+        elif "forebet.com" not in match_url:
+            st.warning("Use a Forebet match-detail URL so we can pull the right history sections.")
+        else:
+            inferred_sport = "basketball" if "/basketball/" in match_url else "football"
+            sport = inferred_sport if selected_sport == "auto" else selected_sport
+            try:
+                os.environ.setdefault("PLAYWRIGHT_BROWSERS_PATH", "0")
+                from ganji_mtaani_agent.db import get_postgres_connection, upsert_forebet_match_analysis, upsert_forebet_match_history_rows
+                from ganji_mtaani_agent.parsers.forebet import (
+                    parse_forebet_basketball_historical_page,
+                    parse_forebet_football_historical_page,
+                )
+                from ganji_mtaani_agent.scrapers.browser import fetch_page
+                from ganji_mtaani_agent.scrapers.sources import get_source_config
+
+                source = get_source_config("forebet")
+                with st.spinner("Fetching Forebet match detail page and parsing history..."):
+                    result = fetch_page(
+                        match_url.strip(),
+                        timeout_ms=60_000,
+                        wait_until=source.default_wait_until,
+                        settle_ms=source.default_settle_ms,
+                        headless=source.default_headless,
+                    )
+
+                    if result.error:
+                        raise RuntimeError(result.error)
+
+                    parser_fn = (
+                        parse_forebet_basketball_historical_page
+                        if sport == "basketball"
+                        else parse_forebet_football_historical_page
+                    )
+                    analysis, history_rows = parser_fn(result.html, match_url=match_url.strip())
+                    if analysis is None:
+                        raise RuntimeError("The Forebet detail page loaded, but the historical parser could not extract a match summary.")
+
+                    with get_postgres_connection(autocommit=True) as connection:
+                        upsert_forebet_match_analysis(connection, analysis=analysis)
+                        upsert_forebet_match_history_rows(connection, rows=history_rows)
+
+                clear_all_caches()
+                st.session_state["historical_match_url"] = match_url.strip()
+                st.session_state["historical_latest_analysis"] = {
+                    "match_url": analysis.match_url,
+                    "sport": analysis.sport,
+                }
+                st.success(
+                    f"Stored historical analysis for {analysis.home_team} vs {analysis.away_team} "
+                    f"with {len(history_rows)} historical rows."
+                )
+            except Exception as exc:
+                st.error(f"Historical analysis failed: {exc}")
+
+    st.markdown("### Saved Analyses")
+    c3, c4 = st.columns([1, 1.8])
+    selected_saved_sport = c3.selectbox("Saved sport", options=["All", "football", "basketball"], key="saved_historical_sport")
+    saved_analyses = safe_rows(
+        fetch_forebet_match_analyses,
+        sport=None if selected_saved_sport == "All" else selected_saved_sport,
+        limit=50,
+    )
+
+    if saved_analyses:
+        option_map = {
+            f"{row['sport'].title()} · {row['home_team']} vs {row['away_team']} · {row.get('event_datetime_text') or 'n/a'}": row
+            for row in saved_analyses
+        }
+        default_label = next(iter(option_map))
+        selected_label = c4.selectbox("Choose a saved match", options=list(option_map), index=0, key="saved_historical_match")
+        selected_analysis = option_map[selected_label]
+
+        st.markdown("### Match Summary")
+        summary_cols = st.columns(4)
+        summary_cols[0].metric("Fixture", f"{selected_analysis['home_team']} vs {selected_analysis['away_team']}")
+        summary_cols[1].metric("Pred", selected_analysis.get("pred_outcome") or "-")
+        summary_cols[2].metric("Correct Score", selected_analysis.get("predicted_score_text") or "-")
+        summary_cols[3].metric("Actual Score", selected_analysis.get("actual_score_text") or selected_analysis.get("actual_status") or "-")
+
+        st.caption(
+            f"{selected_analysis.get('competition') or 'Competition n/a'} · "
+            f"{selected_analysis.get('event_datetime_text') or 'Date n/a'}"
+        )
+        form_left, form_right = st.columns(2)
+        form_left.info(f"Home form: {selected_analysis.get('home_form_sequence') or 'n/a'}")
+        form_right.info(f"Away form: {selected_analysis.get('away_form_sequence') or 'n/a'}")
+
+        history_rows = safe_rows(fetch_forebet_match_history_rows, match_url=selected_analysis["match_url"])
+        if history_rows:
+            st.markdown("### Historical Rows")
+            st.dataframe(
+                history_rows,
+                use_container_width=True,
+                hide_index=True,
+                column_config={
+                    "id": None,
+                    "source_name": None,
+                    "sport": "Sport",
+                    "match_url": None,
+                    "section_name": "Section",
+                    "section_team": "Section Team",
+                    "sequence_no": st.column_config.NumberColumn("#", width="small"),
+                    "event_date_text": "Date",
+                    "competition_tag": "Tag",
+                    "home_team": "Home",
+                    "away_team": "Away",
+                    "score_text": "Score",
+                    "extra_score_text": "Extra Score Detail",
+                    "result_outcome": "Result",
+                    "result_class": None,
+                    "active_side": "Active Side",
+                    "detail_url": st.column_config.LinkColumn("Detail URL"),
+                    "raw_text": None,
+                    "scraped_at": None,
+                },
+            )
+        else:
+            st.info("No saved historical rows were found for this match yet.")
+
+        st.markdown("### Recent Saved Matches")
+        st.dataframe(
+            saved_analyses,
+            use_container_width=True,
+            hide_index=True,
+            column_config={
+                "id": None,
+                "source_name": None,
+                "sport": "Sport",
+                "match_url": st.column_config.LinkColumn("Match URL"),
+                "competition": "Competition",
+                "league_code": "Code",
+                "event_datetime_text": "Event Time",
+                "home_team": "Home",
+                "away_team": "Away",
+                "pred_outcome": "Pred",
+                "predicted_score_text": "Correct Score",
+                "actual_score_text": "Actual Score",
+                "actual_status": "Status",
+                "home_form_sequence": "Home Form",
+                "away_form_sequence": "Away Form",
+                "confidence": st.column_config.NumberColumn("Conf", format="%.2f"),
+                "scraped_at": st.column_config.DatetimeColumn("Scraped"),
+            },
+        )
+    else:
+        st.info("No saved Forebet historical analyses yet. Analyze one match URL to populate this workspace.")
+
+
+# =============================================================================
 # Insurance Products Page
 # =============================================================================
 def render_insurance_page() -> None:
@@ -1098,6 +1277,7 @@ def main() -> None:
     elif page == PAGE_FOREBET:    render_forebet_page()
     elif page == PAGE_POLYMARKET: render_polymarket_page()
     elif page == PAGE_RESULTS:    render_results_page()
+    elif page == PAGE_HISTORY:    render_historical_page()
     elif page == PAGE_INSURANCE:  render_insurance_page()
     else:
         st.error(f"Unknown page: {page}")

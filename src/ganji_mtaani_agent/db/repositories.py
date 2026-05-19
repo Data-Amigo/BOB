@@ -706,6 +706,163 @@ def upsert_flashscore_results(
 
 
 # =============================================================================
+# Forebet Historical Analysis Repository
+# =============================================================================
+def upsert_forebet_match_analysis(
+    connection: Connection,
+    *,
+    analysis: Any,
+) -> int:
+    """Insert or update one Forebet match-analysis summary row."""
+
+    record = _as_record_dict(analysis)
+
+    with connection.cursor() as cursor:
+        cursor.execute(
+            """
+            INSERT INTO forebet_match_analyses (
+                source_name,
+                sport,
+                match_url,
+                competition,
+                league_code,
+                event_datetime_text,
+                home_team,
+                away_team,
+                pred_outcome,
+                predicted_score_text,
+                actual_score_text,
+                actual_status,
+                home_form_sequence,
+                away_form_sequence,
+                confidence
+            )
+            VALUES (
+                %s, %s, %s, %s, %s, %s, %s, %s,
+                %s, %s, %s, %s, %s, %s, %s
+            )
+            ON CONFLICT (source_name, sport, match_url)
+            DO UPDATE SET
+                competition = EXCLUDED.competition,
+                league_code = EXCLUDED.league_code,
+                event_datetime_text = EXCLUDED.event_datetime_text,
+                home_team = EXCLUDED.home_team,
+                away_team = EXCLUDED.away_team,
+                pred_outcome = EXCLUDED.pred_outcome,
+                predicted_score_text = EXCLUDED.predicted_score_text,
+                actual_score_text = EXCLUDED.actual_score_text,
+                actual_status = EXCLUDED.actual_status,
+                home_form_sequence = EXCLUDED.home_form_sequence,
+                away_form_sequence = EXCLUDED.away_form_sequence,
+                confidence = EXCLUDED.confidence,
+                scraped_at = NOW()
+            RETURNING id
+            """,
+            (
+                record.get("source"),
+                record.get("sport"),
+                record.get("match_url"),
+                record.get("competition"),
+                record.get("league_code"),
+                record.get("event_datetime"),
+                record.get("home_team"),
+                record.get("away_team"),
+                record.get("pred_outcome"),
+                record.get("predicted_score_text"),
+                record.get("actual_score_text"),
+                record.get("actual_status"),
+                record.get("home_form_sequence"),
+                record.get("away_form_sequence"),
+                record.get("confidence"),
+            ),
+        )
+        return int(cursor.fetchone()[0])
+
+
+def upsert_forebet_match_history_rows(
+    connection: Connection,
+    *,
+    rows: Sequence[Any],
+) -> int:
+    """Insert or update structured historical rows from Forebet detail pages."""
+
+    prepared_rows: list[tuple[Any, ...]] = []
+
+    for row in rows:
+        record = _as_record_dict(row)
+        prepared_rows.append(
+            (
+                record.get("source"),
+                record.get("sport"),
+                record.get("match_url"),
+                record.get("section_name"),
+                record.get("section_team"),
+                record.get("sequence_no"),
+                record.get("event_date_text"),
+                record.get("competition_tag"),
+                record.get("home_team"),
+                record.get("away_team"),
+                record.get("score_text"),
+                record.get("extra_score_text"),
+                record.get("result_outcome"),
+                record.get("result_class"),
+                record.get("active_side"),
+                record.get("detail_url"),
+                record.get("raw_text"),
+            )
+        )
+
+    if not prepared_rows:
+        return 0
+
+    with connection.cursor() as cursor:
+        cursor.executemany(
+            """
+            INSERT INTO forebet_match_history_rows (
+                source_name,
+                sport,
+                match_url,
+                section_name,
+                section_team,
+                sequence_no,
+                event_date_text,
+                competition_tag,
+                home_team,
+                away_team,
+                score_text,
+                extra_score_text,
+                result_outcome,
+                result_class,
+                active_side,
+                detail_url,
+                raw_text
+            )
+            VALUES (
+                %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                %s, %s, %s, %s, %s, %s, %s, %s
+            )
+            ON CONFLICT (source_name, sport, match_url, section_name, section_team, sequence_no)
+            DO UPDATE SET
+                event_date_text = EXCLUDED.event_date_text,
+                competition_tag = EXCLUDED.competition_tag,
+                home_team = EXCLUDED.home_team,
+                away_team = EXCLUDED.away_team,
+                score_text = EXCLUDED.score_text,
+                extra_score_text = EXCLUDED.extra_score_text,
+                result_outcome = EXCLUDED.result_outcome,
+                result_class = EXCLUDED.result_class,
+                active_side = EXCLUDED.active_side,
+                detail_url = EXCLUDED.detail_url,
+                raw_text = EXCLUDED.raw_text,
+                scraped_at = NOW()
+            """,
+            prepared_rows,
+        )
+
+    return len(prepared_rows)
+
+
+# =============================================================================
 # Polymarket Market Repository
 # =============================================================================
 def upsert_polymarket_markets(

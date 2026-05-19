@@ -171,3 +171,50 @@ class ForebetFootballResult:
     pred_indicator_class: str | None
     raw_text: str
     confidence: float
+
+
+# =============================================================================
+# Forebet Historical Analysis Models
+# =============================================================================
+@dataclass(slots=True)
+class ForebetHistoricalAnalysis:
+    """Structured summary extracted from one Forebet match detail page."""
+
+    source: str
+    sport: str
+    match_url: str
+    competition: str | None
+    league_code: str | None
+    event_datetime: str | None
+    home_team: str
+    away_team: str
+    pred_outcome: str | None
+    predicted_score_text: str | None
+    actual_score_text: str | None
+    actual_status: str | None
+    home_form_sequence: str | None
+    away_form_sequence: str | None
+    confidence: float
+
+
+@dataclass(slots=True)
+class ForebetHistoricalMatchRow:
+    """One historical match row extracted from a Forebet detail section."""
+
+    source: str
+    sport: str
+    match_url: str
+    section_name: str
+    section_team: str
+    sequence_no: int
+    event_date_text: str | None
+    competition_tag: str | None
+    home_team: str
+    away_team: str
+    score_text: str | None
+    extra_score_text: str | None
+    result_outcome: str | None
+    result_class: str | None
+    active_side: str | None
+    detail_url: str | None
+    raw_text: str

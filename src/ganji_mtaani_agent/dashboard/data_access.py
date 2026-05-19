@@ -440,6 +440,52 @@ def fetch_polymarket_summary() -> list[dict[str, Any]]:
     )
 
 
+@st.cache_data(ttl=120)
+def fetch_forebet_match_analyses(*, sport: str | None = None, limit: int = 50) -> list[dict[str, Any]]:
+    clauses = []
+    params: list[Any] = []
+    if sport:
+        clauses.append("sport = %s")
+        params.append(sport)
+    where_sql = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+    params.append(limit)
+    return _fetch_all(
+        f"""
+        SELECT id, source_name, sport, match_url, competition, league_code,
+               event_datetime_text, home_team, away_team, pred_outcome,
+               predicted_score_text, actual_score_text, actual_status,
+               home_form_sequence, away_form_sequence, confidence, scraped_at
+        FROM forebet_match_analyses
+        {where_sql}
+        ORDER BY scraped_at DESC, id DESC
+        LIMIT %s
+        """,
+        params,
+    )
+
+
+@st.cache_data(ttl=120)
+def fetch_forebet_match_history_rows(*, match_url: str, section_name: str | None = None) -> list[dict[str, Any]]:
+    clauses = ["match_url = %s"]
+    params: list[Any] = [match_url]
+    if section_name:
+        clauses.append("section_name = %s")
+        params.append(section_name)
+    where_sql = f"WHERE {' AND '.join(clauses)}"
+    return _fetch_all(
+        f"""
+        SELECT id, source_name, sport, match_url, section_name, section_team, sequence_no,
+               event_date_text, competition_tag, home_team, away_team, score_text,
+               extra_score_text, result_outcome, result_class, active_side, detail_url,
+               raw_text, scraped_at
+        FROM forebet_match_history_rows
+        {where_sql}
+        ORDER BY section_name, section_team, sequence_no
+        """,
+        params,
+    )
+
+
 # =============================================================================
 # Insurance Products Data Access
 # =============================================================================

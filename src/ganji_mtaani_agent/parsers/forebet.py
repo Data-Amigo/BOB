@@ -11,9 +11,13 @@ refinement.
 
 from __future__ import annotations
 
+import re
+
 from bs4 import BeautifulSoup
 
 from ganji_mtaani_agent.models.forebet import (
+    ForebetHistoricalAnalysis,
+    ForebetHistoricalMatchRow,
     ForebetBasketballResult,
     ForebetBasketballPrediction,
     ForebetFootballResult,
@@ -148,6 +152,98 @@ def _derive_outcome_from_scores(home_score: int | None, away_score: int | None, 
     if away_score > home_score:
         return "2"
     return "X" if allow_draw else None
+
+
+def _clean_text(value: str | None) -> str:
+    """Normalize whitespace in a free-text fragment."""
+
+    return " ".join((value or "").split())
+
+
+def _extract_competition_from_meta(soup: BeautifulSoup) -> str | None:
+    """Extract the competition name from Forebet meta description text."""
+
+    meta = soup.select_one("meta[name='description']")
+    content = meta.get("content", "") if meta else ""
+    content = _clean_text(content)
+    if not content:
+        return None
+
+    patterns = (
+        r"match of\s+(.+?)\s+on\s",
+        r"on\s+\d{1,2}/\d{1,2}/\d{4}\s+of\s+(.+?)(?:\.|$)",
+        r"of\s+(.+?)(?:\.|$)",
+    )
+    for pattern in patterns:
+        match = re.search(pattern, content, flags=re.IGNORECASE)
+        if match:
+            return _clean_text(match.group(1))
+    return None
+
+
+def _extract_form_sequences(soup: BeautifulSoup) -> tuple[str | None, str | None]:
+    """Extract top-level recent form sequences for both teams."""
+
+    sequences: list[str] = []
+
+    for block in soup.select("div.prformcont")[:2]:
+        letters = [
+            _clean_text(node.get_text(" ", strip=True))
+            for node in block.find_all(["span", "b"], recursive=False)
+            if _clean_text(node.get_text(" ", strip=True))
+        ]
+        if not letters:
+            letters = [
+                _clean_text(node.get_text(" ", strip=True))
+                for node in block.select("span, b")
+                if _clean_text(node.get_text(" ", strip=True))
+            ]
+        sequences.append(" ".join(letters) if letters else "")
+
+    while len(sequences) < 2:
+        sequences.append("")
+
+    return sequences[0] or None, sequences[1] or None
+
+
+def _score_text_from_spans(node) -> str | None:
+    """Build a score string from child spans when they exist."""
+
+    if node is None:
+        return None
+    parts = [_clean_text(span.get_text(" ", strip=True)) for span in node.select("span")]
+    parts = [part for part in parts if part]
+    if len(parts) >= 2:
+        return f"{parts[0]} - {parts[1]}"
+    if parts:
+        return " ".join(parts)
+    text = _clean_text(node.get_text(" ", strip=True))
+    return text or None
+
+
+def _resolve_detail_url(href: str | None) -> str | None:
+    """Convert a Forebet relative URL into an absolute URL when possible."""
+
+    if not href:
+        return None
+    href = href.strip().replace("\n", "")
+    if href.startswith("http://") or href.startswith("https://"):
+        return href
+    if href.startswith("/"):
+        return f"https://www.forebet.com{href}"
+    return f"https://www.forebet.com/{href.lstrip('/')}"
+
+
+def _map_result_class_to_outcome(result_class: str | None) -> str | None:
+    """Map Forebet row result CSS classes to W/D/L values."""
+
+    if result_class == "winres" or result_class == "st_winres":
+        return "W"
+    if result_class == "loseres" or result_class == "st_lostres":
+        return "L"
+    if result_class == "drawres":
+        return "D"
+    return None
 
 
 # =============================================================================
@@ -417,3 +513,322 @@ def parse_forebet_basketball_yesterday(html: str) -> list[ForebetBasketballResul
             results.append(parsed)
 
     return results
+
+
+def _parse_forebet_football_summary(soup: BeautifulSoup, *, match_url: str) -> ForebetHistoricalAnalysis | None:
+    """Parse the summary block from a Forebet football detail page."""
+
+    row = soup.select_one("div.hdrtb.prblh.tb1x2 ~ div.rcnt")
+    if row is None:
+        row = soup.select_one("div.rcnt")
+    if row is None:
+        return None
+
+    home_team = _clean_text(row.select_one(".homeTeam").get_text(" ", strip=True)) if row.select_one(".homeTeam") else None
+    away_team = _clean_text(row.select_one(".awayTeam").get_text(" ", strip=True)) if row.select_one(".awayTeam") else None
+    if not home_team or not away_team:
+        return None
+
+    pred_outcome = _clean_text(row.select_one(".predict .forepr span").get_text(" ", strip=True)) if row.select_one(".predict .forepr span") else None
+    predicted_score_text = _clean_text(row.select_one(".ex_sc.tabonly").get_text(" ", strip=True)) if row.select_one(".ex_sc.tabonly") else None
+    event_datetime = _clean_text(row.select_one(".date_bah").get_text(" ", strip=True)) if row.select_one(".date_bah") else None
+    league_code = _clean_text(row.select_one(".shortTag").get_text(" ", strip=True)) if row.select_one(".shortTag") else None
+
+    status_node = row.select_one(".lscr_td .mprv")
+    actual_status = _clean_text(status_node.get_text(" ", strip=True)) if status_node else None
+    score_node = row.select_one(".lscr_td .l_scr")
+    actual_score_text = _clean_text(score_node.get_text(" ", strip=True)) if score_node else None
+    if not actual_score_text:
+        actual_score_text = _score_text_from_spans(row.select_one(".lscr_td .fj_column"))
+
+    home_form_sequence, away_form_sequence = _extract_form_sequences(soup)
+
+    return ForebetHistoricalAnalysis(
+        source="forebet",
+        sport="football",
+        match_url=match_url,
+        competition=_extract_competition_from_meta(soup),
+        league_code=league_code or None,
+        event_datetime=event_datetime,
+        home_team=home_team,
+        away_team=away_team,
+        pred_outcome=pred_outcome or None,
+        predicted_score_text=predicted_score_text or None,
+        actual_score_text=actual_score_text or None,
+        actual_status=actual_status or None,
+        home_form_sequence=home_form_sequence,
+        away_form_sequence=away_form_sequence,
+        confidence=0.95,
+    )
+
+
+def _parse_forebet_basketball_summary(soup: BeautifulSoup, *, match_url: str) -> ForebetHistoricalAnalysis | None:
+    """Parse the summary block from a Forebet basketball detail page."""
+
+    row = soup.select_one("div.rcnt")
+    if row is None:
+        return None
+
+    home_team = _clean_text(row.select_one(".homeTeam").get_text(" ", strip=True)) if row.select_one(".homeTeam") else None
+    away_team = _clean_text(row.select_one(".awayTeam").get_text(" ", strip=True)) if row.select_one(".awayTeam") else None
+    if not home_team or not away_team:
+        return None
+
+    pred_wrapper = row.select_one(".predict_y, .predict_no, .predict")
+    pred_outcome = _clean_text(pred_wrapper.select_one(".forepr span").get_text(" ", strip=True)) if pred_wrapper and pred_wrapper.select_one(".forepr span") else None
+    predicted_score_text = _score_text_from_spans(row.select_one(".ex_sc.tabonly"))
+    actual_score_text = _score_text_from_spans(row.select_one(".lscr_td .fj_column"))
+    actual_status = _clean_text(row.select_one(".lmin_td .scoreLnk").get_text(" ", strip=True)) if row.select_one(".lmin_td .scoreLnk") else None
+    event_datetime = _clean_text(row.select_one(".date_bah").get_text(" ", strip=True)) if row.select_one(".date_bah") else None
+    league_code = _clean_text(row.select_one(".shortTag").get_text(" ", strip=True)) if row.select_one(".shortTag") else None
+    home_form_sequence, away_form_sequence = _extract_form_sequences(soup)
+
+    return ForebetHistoricalAnalysis(
+        source="forebet",
+        sport="basketball",
+        match_url=match_url,
+        competition=_extract_competition_from_meta(soup),
+        league_code=league_code or None,
+        event_datetime=event_datetime,
+        home_team=home_team,
+        away_team=away_team,
+        pred_outcome=pred_outcome or None,
+        predicted_score_text=predicted_score_text or None,
+        actual_score_text=actual_score_text or None,
+        actual_status=actual_status or None,
+        home_form_sequence=home_form_sequence,
+        away_form_sequence=away_form_sequence,
+        confidence=0.95,
+    )
+
+
+def _parse_football_section_title(header) -> str:
+    """Return the visible football section title from a module header."""
+
+    direct_children = header.find_all("div", recursive=False)
+    if direct_children:
+        return _clean_text(direct_children[-1].get_text(" ", strip=True))
+    return _clean_text(header.get_text(" ", strip=True))
+
+
+def _parse_forebet_football_history_rows(
+    soup: BeautifulSoup,
+    *,
+    match_url: str,
+    home_team: str,
+    away_team: str,
+) -> list[ForebetHistoricalMatchRow]:
+    """Parse football history sections into normalized rows."""
+
+    rows: list[ForebetHistoricalMatchRow] = []
+    last_six_index = 0
+
+    for module in soup.select("div.moduletable"):
+        header = module.select_one("div.mptlt")
+        if header is None:
+            continue
+
+        title = _parse_football_section_title(header).casefold()
+        section_name: str | None = None
+        section_team: str | None = None
+        if title == "last 6 matches":
+            last_six_index += 1
+            section_name = "last_6_matches"
+            section_team = home_team if last_six_index == 1 else away_team
+        elif title == "home matches":
+            section_name = "home_matches"
+            section_team = home_team
+        elif title == "away matches":
+            section_name = "away_matches"
+            section_team = away_team
+        else:
+            continue
+
+        for sequence_no, row in enumerate(module.select("div.st_row"), start=1):
+            date_parts = [_clean_text(part.get_text(" ", strip=True)) for part in row.select(".st_date > div")]
+            date_parts = [part for part in date_parts if part]
+            event_date_text = "/".join(date_parts) if len(date_parts) == 2 else " ".join(date_parts) or None
+
+            home_node = row.select_one(".st_hteam")
+            away_node = row.select_one(".st_ateam")
+            score_node = row.select_one(".st_res")
+            half_node = row.select_one(".st_htscr")
+            result_node = row.select_one(".st_rescnt")
+            league_node = row.select_one(".st_ltag")
+            detail_link = row.select_one("a.stat_link[href]")
+
+            home_name = _clean_text(home_node.get_text(" ", strip=True)) if home_node else ""
+            away_name = _clean_text(away_node.get_text(" ", strip=True)) if away_node else ""
+            if not home_name or not away_name:
+                continue
+
+            result_class = None
+            if result_node:
+                for class_name in result_node.get("class", []):
+                    if class_name in {"winres", "loseres", "drawres"}:
+                        result_class = class_name
+                        break
+
+            active_side = None
+            if home_node and "active-team" in home_node.get("class", []):
+                active_side = "home"
+            elif away_node and "active-team" in away_node.get("class", []):
+                active_side = "away"
+
+            rows.append(
+                ForebetHistoricalMatchRow(
+                    source="forebet",
+                    sport="football",
+                    match_url=match_url,
+                    section_name=section_name,
+                    section_team=section_team,
+                    sequence_no=sequence_no,
+                    event_date_text=event_date_text,
+                    competition_tag=_clean_text(league_node.get_text(" ", strip=True)) if league_node else None,
+                    home_team=home_name,
+                    away_team=away_name,
+                    score_text=_clean_text(score_node.get_text(" ", strip=True)) if score_node else None,
+                    extra_score_text=_clean_text(half_node.get_text(" ", strip=True)) if half_node else None,
+                    result_outcome=_map_result_class_to_outcome(result_class),
+                    result_class=result_class,
+                    active_side=active_side,
+                    detail_url=_resolve_detail_url(detail_link.get("href")) if detail_link else None,
+                    raw_text=_clean_text(row.get_text(" ", strip=True)),
+                )
+            )
+
+    return rows
+
+
+def _extract_basketball_section_name_and_team(title: str) -> tuple[str | None, str | None]:
+    """Split a basketball historical section title into section kind and team."""
+
+    normalized = _clean_text(title)
+    for suffix, section_name in (
+        ("Last 6 matches", "last_6_matches"),
+        ("home matches", "home_matches"),
+        ("away matches", "away_matches"),
+    ):
+        if normalized.endswith(suffix):
+            section_team = _clean_text(normalized[: -len(suffix)])
+            return section_name, section_team
+    return None, None
+
+
+def _parse_basketball_quarter_text(row) -> str | None:
+    """Convert basketball quarter spans into a compact summary string."""
+
+    quarter_rows = row.select(".ov_gp .fj_between")
+    if not quarter_rows:
+        return None
+
+    chunks: list[str] = []
+    for index, quarter_row in enumerate(quarter_rows, start=1):
+        values = [_clean_text(span.get_text(" ", strip=True)) for span in quarter_row.select("span")]
+        values = [value for value in values if value]
+        if len(values) >= 2:
+            chunks.append(f"Q{index}: {'-'.join(values[:2])}")
+    return " | ".join(chunks) if chunks else None
+
+
+def _parse_forebet_basketball_history_rows(
+    soup: BeautifulSoup,
+    *,
+    match_url: str,
+) -> list[ForebetHistoricalMatchRow]:
+    """Parse basketball history sections into normalized rows."""
+
+    rows: list[ForebetHistoricalMatchRow] = []
+
+    for wrapper in soup.select("div.mmatches_mc div.mx-width_hc"):
+        title_node = wrapper.select_one(".st_minih span")
+        if title_node is None:
+            continue
+
+        section_name, section_team = _extract_basketball_section_name_and_team(title_node.get_text(" ", strip=True))
+        if not section_name or not section_team:
+            continue
+
+        for sequence_no, row in enumerate(wrapper.select("div.ov_row"), start=1):
+            date_parts = [_clean_text(part.get_text(" ", strip=True)) for part in row.select(".st_dt")]
+            date_parts = [part for part in date_parts if part]
+            event_date_text = "/".join(date_parts) if len(date_parts) == 2 else " ".join(date_parts) or None
+
+            team_spans = row.select(".st_tnames > span")
+            if len(team_spans) < 2:
+                continue
+
+            home_name = _clean_text(team_spans[0].get_text(" ", strip=True))
+            away_name = _clean_text(team_spans[1].get_text(" ", strip=True))
+            active_side = "home" if "st_bold" in team_spans[0].get("class", []) else "away" if "st_bold" in team_spans[1].get("class", []) else None
+
+            score_spans = row.select(".sm_btn > span")
+            score_values = [_clean_text(span.get_text(" ", strip=True)) for span in score_spans if _clean_text(span.get_text(" ", strip=True))]
+            score_text = f"{score_values[0]} - {score_values[1]}" if len(score_values) >= 2 else None
+
+            result_button = row.select_one(".sm_btn")
+            result_class = None
+            if result_button:
+                for class_name in result_button.get("class", []):
+                    if class_name in {"st_winres", "st_lostres"}:
+                        result_class = class_name
+                        break
+
+            rows.append(
+                ForebetHistoricalMatchRow(
+                    source="forebet",
+                    sport="basketball",
+                    match_url=match_url,
+                    section_name=section_name,
+                    section_team=section_team,
+                    sequence_no=sequence_no,
+                    event_date_text=event_date_text,
+                    competition_tag=None,
+                    home_team=home_name,
+                    away_team=away_name,
+                    score_text=score_text,
+                    extra_score_text=_parse_basketball_quarter_text(row),
+                    result_outcome=_map_result_class_to_outcome(result_class),
+                    result_class=result_class,
+                    active_side=active_side,
+                    detail_url=None,
+                    raw_text=_clean_text(row.get_text(" ", strip=True)),
+                )
+            )
+
+    return rows
+
+
+def parse_forebet_football_historical_page(
+    html: str,
+    *,
+    match_url: str,
+) -> tuple[ForebetHistoricalAnalysis | None, list[ForebetHistoricalMatchRow]]:
+    """Parse one Forebet football match-detail page into summary + history rows."""
+
+    soup = BeautifulSoup(html, "html.parser")
+    analysis = _parse_forebet_football_summary(soup, match_url=match_url)
+    if analysis is None:
+        return None, []
+    rows = _parse_forebet_football_history_rows(
+        soup,
+        match_url=match_url,
+        home_team=analysis.home_team,
+        away_team=analysis.away_team,
+    )
+    return analysis, rows
+
+
+def parse_forebet_basketball_historical_page(
+    html: str,
+    *,
+    match_url: str,
+) -> tuple[ForebetHistoricalAnalysis | None, list[ForebetHistoricalMatchRow]]:
+    """Parse one Forebet basketball match-detail page into summary + history rows."""
+
+    soup = BeautifulSoup(html, "html.parser")
+    analysis = _parse_forebet_basketball_summary(soup, match_url=match_url)
+    if analysis is None:
+        return None, []
+    rows = _parse_forebet_basketball_history_rows(soup, match_url=match_url)
+    return analysis, rows
