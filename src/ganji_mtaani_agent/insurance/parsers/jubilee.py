@@ -87,7 +87,7 @@ def _score_confidence(product_name: str, description: str, benefits: list[str]) 
 # Cards sit inside div.row.olddata (the full static set). The JS-rendered
 # div#datafetch duplicates the same links when a filter is active — de-duplication
 # by building a set is handled by the `if href not in urls` guard.
-def parse_product_listing(html: str, base_url: str) -> list[str]:
+def parse_product_listing(html: str, base_url: str, listing_url: str = "") -> list[str]:
     """Extract individual product URLs from a Jubilee category listing page.
 
     Args:

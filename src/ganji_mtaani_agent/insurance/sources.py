@@ -113,22 +113,66 @@ INSURANCE_SOURCES: dict[str, InsuranceSourceConfig] = {
         name="britam",
         display_name="Britam",
         base_url="https://ke.britam.com",
-        default_target="health",
-        description="Britam Kenya — insurance and asset management products across health, life, and general lines.",
+        default_target="personal_protection",
+        description="Britam Kenya — insurance, savings, education, and pension products for individuals and businesses.",
+        default_wait_until="load",
+        default_settle_ms=6_000,
         targets={
-            "health": InsuranceSourceTarget(
-                name="health",
-                display_name="Health Insurance",
-                url="https://ke.britam.com/insurance/health-insurance",
+            # --- Personal protection products --------------------------------
+            # The sub-category listing pages (e.g. /health-insurance-covers)
+            # time out; the parent overview page loads and contains all product
+            # links in its navigation, so it is used as the listing source.
+            "personal_protection": InsuranceSourceTarget(
+                name="personal_protection",
+                display_name="Personal Protection",
+                url="https://ke.britam.com/home/personal/protect-who-you-love",
                 category="health",
-                description="Britam individual and group health insurance products.",
+                description="All personal protection products: health, life, funeral, travel, personal accident.",
             ),
-            "life": InsuranceSourceTarget(
-                name="life",
-                display_name="Life Insurance",
-                url="https://ke.britam.com/insurance/life-insurance",
-                category="life",
-                description="Britam life and savings insurance products.",
+            # --- Personal property / motor products --------------------------
+            "personal_property": InsuranceSourceTarget(
+                name="personal_property",
+                display_name="Personal Property & Motor",
+                url="https://ke.britam.com/home/personal/protect-what-you-love",
+                category="motor",
+                description="Motor, home, fire & burglary, and other personal property products.",
+            ),
+            # --- Savings & investment products --------------------------------
+            "education": InsuranceSourceTarget(
+                name="education",
+                display_name="Education Plans",
+                url="https://ke.britam.com/save-and-invest/personal/education-plans",
+                category="education",
+                description="Britam education savings plans for school and university fees.",
+            ),
+            "savings": InsuranceSourceTarget(
+                name="savings",
+                display_name="Insurance Savings Plans",
+                url="https://ke.britam.com/save-and-invest/personal/insurance-savings-plans",
+                category="savings",
+                description="Britam insurance-linked savings plans (Akiba, Dhamana).",
+            ),
+            "investment": InsuranceSourceTarget(
+                name="investment",
+                display_name="Investment-Linked Plans",
+                url="https://ke.britam.com/save-and-invest/personal/invest/investment-linked",
+                category="investment",
+                description="Britam investment-linked insurance plans (Imarika Plus, Nawiri).",
+            ),
+            "unit_trust": InsuranceSourceTarget(
+                name="unit_trust",
+                display_name="Unit Trust Funds",
+                url="https://ke.britam.com/save-and-invest/personal/invest/unit-trust-funds",
+                category="investment",
+                description="Britam unit trust funds: money market, bond, equity, balanced.",
+            ),
+            # --- Pension & retirement products --------------------------------
+            "pension": InsuranceSourceTarget(
+                name="pension",
+                display_name="Pension & Retirement",
+                url="https://ke.britam.com/pension/personal",
+                category="pension",
+                description="Britam personal pension and retirement products (individual plans, annuities, drawdown).",
             ),
         },
     ),

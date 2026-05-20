@@ -4,6 +4,7 @@ import time
 from types import ModuleType
 
 from ganji_mtaani_agent.insurance.models.product import InsuranceProduct
+from ganji_mtaani_agent.insurance.parsers import britam as _britam
 from ganji_mtaani_agent.insurance.parsers import jubilee as _jubilee
 from ganji_mtaani_agent.insurance.sources import get_insurance_source, get_insurance_target
 from ganji_mtaani_agent.scrapers.browser import fetch_page
@@ -18,6 +19,7 @@ from ganji_mtaani_agent.scrapers.browser import fetch_page
 #
 # Add one line here each time a new parser is implemented.
 _PARSERS: dict[str, ModuleType] = {
+    "britam":  _britam,
     "jubilee": _jubilee,
 }
 
@@ -105,7 +107,7 @@ def scrape_source_target(
     # -------------------------------------------------------------------------
     # Step 2 — extract product detail URLs from the listing HTML
     # -------------------------------------------------------------------------
-    product_urls = parser.parse_product_listing(listing.html, source.base_url)
+    product_urls = parser.parse_product_listing(listing.html, source.base_url, target.url)
     _log(verbose, f"found {len(product_urls)} product URLs")
 
     # -------------------------------------------------------------------------
