@@ -7,7 +7,7 @@ sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="repla
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from ganji_mtaani_agent.insurance.parsers import britam, jubilee
+from ganji_mtaani_agent.insurance.parsers import britam, jubilee, old_mutual
 
 
 def _print_product(p, label):
@@ -71,4 +71,22 @@ for snap, url, cat in britam_detail_cases:
     print(f"\n--- {url.split('/')[-1]} ---")
     html = Path(snap).read_text(encoding="utf-8")
     p = britam.parse_product_page(html, url, cat)
+    _print_product(p, snap)
+
+# ── Old Mutual detail pages ───────────────────────────────────────────────────
+print("\n" + "="*70)
+print("OLD MUTUAL — product pages")
+print("="*70)
+old_mutual_cases = [
+    ("data/raw/insurance/old_mutual/term_cover.html",
+     "https://www.oldmutual.co.ke/personal/insure/term-cover", "life"),
+    ("data/raw/insurance/old_mutual/afya_imara.html",
+     "https://www.oldmutual.co.ke/personal/insure/health-insurance/afyaimara-family-cover/", "health"),
+    ("data/raw/insurance/old_mutual/lengo_edu.html",
+     "https://www.oldmutual.co.ke/personal/save-and-invest/lengo-education-plan", "education"),
+]
+for snap, url, cat in old_mutual_cases:
+    print(f"\n--- {url.split('/')[-1].rstrip('/')} ---")
+    html = Path(snap).read_text(encoding="utf-8", errors="replace")
+    p = old_mutual.parse_product_page(html, url, cat)
     _print_product(p, snap)

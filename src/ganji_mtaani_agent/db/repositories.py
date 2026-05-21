@@ -458,6 +458,7 @@ def insert_forebet_predictions(
                 record.get("league"),
                 record.get("home_team"),
                 record.get("away_team"),
+                record.get("match_url"),
                 record.get("event_datetime"),
                 record.get("prob_1"),
                 record.get("prob_x"),
@@ -493,6 +494,7 @@ def insert_forebet_predictions(
                 league,
                 home_team,
                 away_team,
+                match_url,
                 event_datetime_text,
                 prob_1,
                 prob_x,
@@ -516,7 +518,7 @@ def insert_forebet_predictions(
             VALUES (
                 %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
                 %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
-                %s, %s, %s, %s, %s
+                %s, %s, %s, %s, %s, %s
             )
             """,
             prepared_rows,
@@ -548,6 +550,7 @@ def upsert_forebet_results(
                 record.get("league"),
                 record.get("home_team"),
                 record.get("away_team"),
+                record.get("match_url"),
                 record.get("event_datetime"),
                 record.get("prob_1"),
                 record.get("prob_x"),
@@ -581,6 +584,7 @@ def upsert_forebet_results(
                 league,
                 home_team,
                 away_team,
+                match_url,
                 event_datetime_text,
                 prob_1,
                 prob_x,
@@ -601,12 +605,13 @@ def upsert_forebet_results(
             )
             VALUES (
                 %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
-                %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
+                %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
             )
             ON CONFLICT (source_name, sport, event_datetime_text, home_team, away_team)
             DO UPDATE SET
                 run_id = EXCLUDED.run_id,
                 league = EXCLUDED.league,
+                match_url = EXCLUDED.match_url,
                 prob_1 = EXCLUDED.prob_1,
                 prob_x = EXCLUDED.prob_x,
                 prob_2 = EXCLUDED.prob_2,

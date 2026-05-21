@@ -241,7 +241,7 @@ def fetch_forebet_results(*, sport: str | None = None, status: str | None = None
     return _fetch_all(
         f"""
         SELECT id, run_id, source_name, sport, league, home_team, away_team,
-               event_datetime_text, prob_1, prob_x, prob_2, pred_outcome,
+               match_url, event_datetime_text, prob_1, prob_x, prob_2, pred_outcome,
                predicted_home_score, predicted_away_score, predicted_score_text,
                actual_home_score, actual_away_score, actual_score_text, actual_outcome,
                status, pred_hit, pred_indicator_class, confidence, created_at
@@ -360,7 +360,7 @@ def fetch_forebet_predictions(*, sport: str | None = None, league: str | None = 
     return _fetch_all(
         f"""
         SELECT id, run_id, source_name, sport, league, home_team, away_team,
-               event_datetime_text, prob_1, prob_x, prob_2, pred_outcome,
+               match_url, event_datetime_text, prob_1, prob_x, prob_2, pred_outcome,
                predicted_home_score, predicted_away_score, correct_score_text,
                avg_goals, avg_points, weather, coef_1, coef_x, coef_2,
                coef_3, coef_extra, remaining_tokens_json, confidence, created_at
@@ -506,12 +506,13 @@ def fetch_insurance_summary() -> list[dict[str, Any]]:
     return _fetch_all(
         """
         SELECT insurer_name,
+               insurer_slug,
                product_type,
                COUNT(*)              AS product_count,
                ROUND(AVG(confidence)::numeric, 2) AS avg_confidence,
                MAX(scraped_at)       AS last_scraped
         FROM insurance_products
-        GROUP BY insurer_name, product_type
+        GROUP BY insurer_name, insurer_slug, product_type
         ORDER BY insurer_name, product_type
         """
     )

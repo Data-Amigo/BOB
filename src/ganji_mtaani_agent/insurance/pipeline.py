@@ -6,6 +6,7 @@ from types import ModuleType
 from ganji_mtaani_agent.insurance.models.product import InsuranceProduct
 from ganji_mtaani_agent.insurance.parsers import britam as _britam
 from ganji_mtaani_agent.insurance.parsers import jubilee as _jubilee
+from ganji_mtaani_agent.insurance.parsers import old_mutual as _old_mutual
 from ganji_mtaani_agent.insurance.sources import get_insurance_source, get_insurance_target
 from ganji_mtaani_agent.scrapers.browser import fetch_page
 
@@ -19,8 +20,9 @@ from ganji_mtaani_agent.scrapers.browser import fetch_page
 #
 # Add one line here each time a new parser is implemented.
 _PARSERS: dict[str, ModuleType] = {
-    "britam":  _britam,
-    "jubilee": _jubilee,
+    "britam":     _britam,
+    "jubilee":    _jubilee,
+    "old_mutual": _old_mutual,
 }
 
 

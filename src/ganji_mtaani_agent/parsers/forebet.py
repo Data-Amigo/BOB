@@ -234,6 +234,15 @@ def _resolve_detail_url(href: str | None) -> str | None:
     return f"https://www.forebet.com/{href.lstrip('/')}"
 
 
+def _extract_match_url_from_row(row) -> str | None:
+    """Extract the Forebet match-detail URL from one result or prediction row."""
+
+    link = row.select_one("a.tnmscn[href]")
+    if link is None:
+        return None
+    return _resolve_detail_url(link.get("href"))
+
+
 def _map_result_class_to_outcome(result_class: str | None) -> str | None:
     """Map Forebet row result CSS classes to W/D/L values."""
 
@@ -268,7 +277,7 @@ def tokenize_football_row_text(row_text: str) -> list[str]:
 # This function parses only the stable basketball row core that we understand today.
 # It ignores the dash token and stores everything after the stable core in
 # remaining_tokens for later work.
-def parse_basketball_row(row_text: str) -> ForebetBasketballPrediction | None:
+def parse_basketball_row(row_text: str, *, match_url: str | None = None) -> ForebetBasketballPrediction | None:
     """Parse one flattened Forebet basketball row into a model object."""
 
     tokens = tokenize_basketball_row_text(row_text)
@@ -286,6 +295,7 @@ def parse_basketball_row(row_text: str) -> ForebetBasketballPrediction | None:
         league=tokens[BASKETBALL_LEAGUE_INDEX],
         home_team=tokens[BASKETBALL_HOME_TEAM_INDEX],
         away_team=tokens[BASKETBALL_AWAY_TEAM_INDEX],
+        match_url=match_url,
         event_datetime=tokens[BASKETBALL_EVENT_DATETIME_INDEX],
         prob_1=_to_int(tokens[BASKETBALL_PROB_1_INDEX]),
         prob_2=_to_int(tokens[BASKETBALL_PROB_2_INDEX]),
@@ -307,7 +317,7 @@ def parse_basketball_row(row_text: str) -> ForebetBasketballPrediction | None:
 # =============================================================================
 # This function parses only the stable football row core that we understand today.
 # It keeps the uncertain live-state and extra values in remaining_tokens.
-def parse_football_row(row_text: str) -> ForebetFootballPrediction | None:
+def parse_football_row(row_text: str, *, match_url: str | None = None) -> ForebetFootballPrediction | None:
     """Parse one flattened Forebet football row into a model object."""
 
     tokens = tokenize_football_row_text(row_text)
@@ -325,6 +335,7 @@ def parse_football_row(row_text: str) -> ForebetFootballPrediction | None:
         league=tokens[FOOTBALL_LEAGUE_INDEX],
         home_team=tokens[FOOTBALL_HOME_TEAM_INDEX],
         away_team=tokens[FOOTBALL_AWAY_TEAM_INDEX],
+        match_url=match_url,
         event_datetime=tokens[FOOTBALL_EVENT_DATETIME_INDEX],
         prob_1=_to_int(tokens[FOOTBALL_PROB_1_INDEX]),
         prob_x=_to_int(tokens[FOOTBALL_PROB_X_INDEX]),
@@ -349,6 +360,7 @@ def parse_football_result_row(row) -> ForebetFootballResult | None:
     """Parse one Forebet football yesterday row into a result model object."""
 
     row_text = row.get_text(" | ", strip=True)
+    match_url = _extract_match_url_from_row(row)
     tokens = tokenize_football_row_text(row_text)
     if len(tokens) < FOOTBALL_RESULT_MINIMUM_EXPECTED_TOKENS:
         return None
@@ -370,6 +382,7 @@ def parse_football_result_row(row) -> ForebetFootballResult | None:
         league=tokens[FOOTBALL_LEAGUE_INDEX],
         home_team=tokens[FOOTBALL_HOME_TEAM_INDEX],
         away_team=tokens[FOOTBALL_AWAY_TEAM_INDEX],
+        match_url=match_url,
         event_datetime=tokens[FOOTBALL_EVENT_DATETIME_INDEX],
         prob_1=_to_int(tokens[FOOTBALL_PROB_1_INDEX]),
         prob_x=_to_int(tokens[FOOTBALL_PROB_X_INDEX]),
@@ -394,6 +407,7 @@ def parse_basketball_result_row(row) -> ForebetBasketballResult | None:
     """Parse one Forebet basketball yesterday row into a result model object."""
 
     row_text = row.get_text(" | ", strip=True)
+    match_url = _extract_match_url_from_row(row)
     tokens = tokenize_basketball_row_text(row_text)
     if len(tokens) < BASKETBALL_RESULT_MINIMUM_EXPECTED_TOKENS:
         return None
@@ -416,6 +430,7 @@ def parse_basketball_result_row(row) -> ForebetBasketballResult | None:
         league=tokens[BASKETBALL_LEAGUE_INDEX],
         home_team=tokens[BASKETBALL_HOME_TEAM_INDEX],
         away_team=tokens[BASKETBALL_AWAY_TEAM_INDEX],
+        match_url=match_url,
         event_datetime=tokens[BASKETBALL_EVENT_DATETIME_INDEX],
         prob_1=_to_int(tokens[BASKETBALL_PROB_1_INDEX]),
         prob_2=_to_int(tokens[BASKETBALL_PROB_2_INDEX]),
@@ -450,7 +465,7 @@ def parse_forebet_basketball(html: str) -> list[ForebetBasketballPrediction]:
 
     for row in container.select("div.rcnt"):
         row_text = row.get_text(" | ", strip=True)
-        parsed = parse_basketball_row(row_text)
+        parsed = parse_basketball_row(row_text, match_url=_extract_match_url_from_row(row))
         if parsed is not None:
             predictions.append(parsed)
 
@@ -472,7 +487,7 @@ def parse_forebet_football(html: str) -> list[ForebetFootballPrediction]:
 
     for row in rows:
         row_text = row.get_text(" | ", strip=True)
-        parsed = parse_football_row(row_text)
+        parsed = parse_football_row(row_text, match_url=_extract_match_url_from_row(row))
         if parsed is not None:
             predictions.append(parsed)
 

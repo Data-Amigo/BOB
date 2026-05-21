@@ -38,6 +38,7 @@ class ForebetBasketballPrediction:
     league: str
     home_team: str
     away_team: str
+    match_url: str | None
     event_datetime: str
     prob_1: int | None
     prob_2: int | None
@@ -93,6 +94,7 @@ class ForebetFootballPrediction:
     league: str
     home_team: str
     away_team: str
+    match_url: str | None
     event_datetime: str
     prob_1: int | None
     prob_x: int | None
@@ -124,6 +126,7 @@ class ForebetBasketballResult:
     league: str
     home_team: str
     away_team: str
+    match_url: str | None
     event_datetime: str
     prob_1: int | None
     prob_2: int | None
@@ -154,6 +157,7 @@ class ForebetFootballResult:
     league: str
     home_team: str
     away_team: str
+    match_url: str | None
     event_datetime: str
     prob_1: int | None
     prob_x: int | None

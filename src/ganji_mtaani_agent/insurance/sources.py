@@ -205,22 +205,34 @@ INSURANCE_SOURCES: dict[str, InsuranceSourceConfig] = {
         name="old_mutual",
         display_name="Old Mutual",
         base_url="https://www.oldmutual.co.ke",
-        default_target="life",
-        description="Old Mutual Kenya — long-term insurance, savings, and investment products.",
+        default_target="personal_insure",
+        description="Old Mutual Kenya — insurance, savings, education, pension, and investment products.",
+        default_wait_until="domcontentloaded",
+        default_settle_ms=4_000,
         targets={
-            "life": InsuranceSourceTarget(
-                name="life",
-                display_name="Life Insurance",
-                url="https://www.oldmutual.co.ke/personal/life-cover",
+            # All personal insurance products: life, health, accident, travel, motor, home
+            "personal_insure": InsuranceSourceTarget(
+                name="personal_insure",
+                display_name="Personal Insurance",
+                url="https://www.oldmutual.co.ke/personal/insure/",
                 category="life",
-                description="Old Mutual life cover and savings products.",
+                description="All Old Mutual personal insurance: life, health, accident, travel, motor, home.",
             ),
-            "health": InsuranceSourceTarget(
-                name="health",
-                display_name="Health Insurance",
-                url="https://www.oldmutual.co.ke/personal/health",
-                category="health",
-                description="Old Mutual health insurance products.",
+            # Savings, education, and pension products
+            "save_invest": InsuranceSourceTarget(
+                name="save_invest",
+                display_name="Save & Invest",
+                url="https://www.oldmutual.co.ke/personal/save-and-invest/",
+                category="savings",
+                description="Old Mutual savings, education, and pension products.",
+            ),
+            # Unit trust funds
+            "unit_trust": InsuranceSourceTarget(
+                name="unit_trust",
+                display_name="Unit Trust Funds",
+                url="https://www.oldmutual.co.ke/investment/unit-trust/",
+                category="investment",
+                description="Old Mutual unit trust funds: money market, equity, balanced, bond.",
             ),
         },
     ),
