@@ -5,8 +5,11 @@ from types import ModuleType
 
 from ganji_mtaani_agent.insurance.models.product import InsuranceProduct
 from ganji_mtaani_agent.insurance.parsers import britam as _britam
+from ganji_mtaani_agent.insurance.parsers import cic as _cic
+from ganji_mtaani_agent.insurance.parsers import icea_lion as _icea_lion
 from ganji_mtaani_agent.insurance.parsers import jubilee as _jubilee
 from ganji_mtaani_agent.insurance.parsers import old_mutual as _old_mutual
+from ganji_mtaani_agent.insurance.parsers import sanlam as _sanlam
 from ganji_mtaani_agent.insurance.sources import get_insurance_source, get_insurance_target
 from ganji_mtaani_agent.scrapers.browser import fetch_page
 
@@ -15,14 +18,20 @@ from ganji_mtaani_agent.scrapers.browser import fetch_page
 # Parser Registry
 # =============================================================================
 # Maps source slug → parser module. Each module must expose:
-#   parse_product_listing(html, base_url) -> list[str]
-#   parse_product_page(html, product_url, category) -> InsuranceProduct | None
+#   parse_product_listing(html, base_url, listing_url) -> list[str]
+#   parse_product_page(html, product_url, category)
+#       -> InsuranceProduct | list[InsuranceProduct] | None
 #
-# Add one line here each time a new parser is implemented.
+# Parsers that return a list from parse_product_page (e.g. CIC, which puts
+# multiple products on one sub-category page) are handled transparently by
+# the pipeline.
 _PARSERS: dict[str, ModuleType] = {
     "britam":     _britam,
+    "cic":        _cic,
+    "icea_lion":  _icea_lion,
     "jubilee":    _jubilee,
     "old_mutual": _old_mutual,
+    "sanlam":     _sanlam,
 }
 
 
@@ -138,14 +147,21 @@ def scrape_source_target(
         for w in detail.warnings:
             print(f"[warn] {w}")
 
-        product = parser.parse_product_page(detail.html, url, target.category)
+        result = parser.parse_product_page(detail.html, url, target.category)
 
-        if product is None:
+        if result is None:
             print(f"[skip] parser returned None for {url}")
             continue
 
-        products.append(product)
-        _log(verbose, f"[ok] {product.product_name}  confidence={product.confidence}")
+        # Support multi-product parsers (e.g. CIC sub-category pages)
+        if isinstance(result, list):
+            for prod in result:
+                if prod:
+                    products.append(prod)
+                    _log(verbose, f"[ok] {prod.product_name}  confidence={prod.confidence}")
+        else:
+            products.append(result)
+            _log(verbose, f"[ok] {result.product_name}  confidence={result.confidence}")
 
     _log(verbose, f"done - {len(products)}/{total} products parsed")
     return products
@@ -156,4 +172,5 @@ def scrape_source_target(
 # =============================================================================
 def _log(verbose: bool, msg: str) -> None:
     if verbose:
-        print(f"[pipeline] {msg}")
+        safe = msg.encode("ascii", "replace").decode("ascii")
+        print(f"[pipeline] {safe}")

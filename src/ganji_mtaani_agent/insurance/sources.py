@@ -180,23 +180,29 @@ INSURANCE_SOURCES: dict[str, InsuranceSourceConfig] = {
     "cic": InsuranceSourceConfig(
         name="cic",
         display_name="CIC Insurance",
-        base_url="https://www.cicinsurancegroup.com",
-        default_target="health",
-        description="CIC Insurance Group — cooperative-based insurer offering health, life, and general products.",
+        base_url="https://ke.cicinsurancegroup.com",
+        default_target="individual",
+        description="CIC Insurance Group (Kenya) — cooperative-based insurer with individual, business, and cooperatives products.",
+        default_wait_until="networkidle",
+        default_settle_ms=4_000,
         targets={
-            "health": InsuranceSourceTarget(
-                name="health",
-                display_name="Health Insurance",
-                url="https://www.cicinsurancegroup.com/products/health-insurance",
-                category="health",
-                description="CIC individual and group medical insurance plans.",
-            ),
-            "life": InsuranceSourceTarget(
-                name="life",
-                display_name="Life Insurance",
-                url="https://www.cicinsurancegroup.com/products/life-insurance",
+            # Individual solutions: savings, health, accident, retirement, investment,
+            # domestic, professional indemnity.  Each sub-category page holds multiple
+            # products introduced by h3 "Why [Product Name]" headings.
+            "individual": InsuranceSourceTarget(
+                name="individual",
+                display_name="Individual Solutions",
+                url="https://ke.cicinsurancegroup.com/individual-solutions/",
                 category="life",
-                description="CIC life insurance and investment-linked products.",
+                description="CIC individual solutions: savings, health, accident, retirement, investment, domestic.",
+            ),
+            # Business solutions: motor, fire, burglary, accident, investment.
+            "business": InsuranceSourceTarget(
+                name="business",
+                display_name="Business Solutions",
+                url="https://ke.cicinsurancegroup.com/business-solutions/",
+                category="general",
+                description="CIC business insurance: motor, fire, burglary, group accident, investment.",
             ),
         },
     ),
@@ -241,15 +247,20 @@ INSURANCE_SOURCES: dict[str, InsuranceSourceConfig] = {
         name="sanlam",
         display_name="Sanlam Kenya",
         base_url="https://www.sanlam.co.ke",
-        default_target="life",
-        description="Sanlam Kenya — life, savings, and investment products.",
+        default_target="all_products",
+        description="Sanlam Kenya General Insurance — motor, home, travel, personal accident, and commercial products.",
+        default_wait_until="networkidle",
+        default_settle_ms=3_000,
         targets={
-            "life": InsuranceSourceTarget(
-                name="life",
-                display_name="Life Insurance",
-                url="https://www.sanlam.co.ke/products/life-insurance",
-                category="life",
-                description="Sanlam Kenya life insurance and investment products.",
+            # The /general-insurance/individual and /general-insurance/corporate
+            # sub-pages return empty HTML; the parent /general-insurance overview
+            # page contains all product links (individual + corporate).
+            "all_products": InsuranceSourceTarget(
+                name="all_products",
+                display_name="All Products",
+                url="https://www.sanlam.co.ke/general-insurance",
+                category="general",
+                description="All Sanlam Kenya products: personal and commercial general insurance.",
             ),
         },
     ),
@@ -258,22 +269,20 @@ INSURANCE_SOURCES: dict[str, InsuranceSourceConfig] = {
         name="icea_lion",
         display_name="ICEA Lion",
         base_url="https://www.icealion.co.ke",
-        default_target="health",
-        description="ICEA Lion Group — insurance and asset management across health, life, and general lines.",
+        default_target="all_products",
+        description="ICEA Lion Group — insurance and asset management across health, life, general, pension, and investment lines.",
+        default_wait_until="domcontentloaded",
+        default_settle_ms=4_000,
         targets={
-            "health": InsuranceSourceTarget(
-                name="health",
-                display_name="Health Insurance",
-                url="https://www.icealion.co.ke/insurance/health-insurance",
-                category="health",
-                description="ICEA Lion medical insurance plans.",
-            ),
-            "life": InsuranceSourceTarget(
-                name="life",
-                display_name="Life Insurance",
-                url="https://www.icealion.co.ke/insurance/life-insurance",
+            # ICEA Lion uses a flat URL scheme: every product lives at /<slug>.
+            # There are no section listing pages, so the homepage is used as the
+            # listing source.  The parser filters to single-segment product slugs.
+            "all_products": InsuranceSourceTarget(
+                name="all_products",
+                display_name="All Products",
+                url="https://www.icealion.co.ke",
                 category="life",
-                description="ICEA Lion life and savings products.",
+                description="All ICEA Lion products: life, health, motor, general, pension, and investment.",
             ),
         },
     ),
