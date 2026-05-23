@@ -115,6 +115,7 @@ def fetch_page(
     wait_until: str = "domcontentloaded",
     settle_ms: int = 3_000,
     headless: bool = True,
+    ignore_https_errors: bool = False,
     click_selector_before_capture: str | None = None,
     click_selector_max_times: int = 0,
     click_text_before_capture: str | None = None,
@@ -176,7 +177,8 @@ def fetch_page(
         # page.goto opens the target URL and waits for the selected load state.
         with sync_playwright() as playwright:
             browser = playwright.chromium.launch(headless=headless)
-            page = browser.new_page()
+            context = browser.new_context(ignore_https_errors=ignore_https_errors)
+            page = context.new_page()
             page.goto(url, wait_until=wait_until, timeout=timeout_ms)
 
             # Some sites fire continuous network requests. Instead of waiting for

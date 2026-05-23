@@ -56,6 +56,8 @@ class InsuranceSourceConfig:
     default_wait_until: str = "domcontentloaded"
     default_settle_ms: int = 4_000
     default_headless: bool = True
+    ignore_https_errors: bool = False
+    skip_listing_fetch: bool = False
 
     @property
     def default_url(self) -> str:
@@ -290,16 +292,20 @@ INSURANCE_SOURCES: dict[str, InsuranceSourceConfig] = {
     "aar": InsuranceSourceConfig(
         name="aar",
         display_name="AAR Insurance",
-        base_url="https://www.aar-insurance.com",
-        default_target="health",
-        description="AAR Insurance Kenya — specialist health and medical insurance provider.",
+        base_url="https://aar-insurance.com",
+        default_target="all_products",
+        description="AAR Insurance Kenya — health, personal accident, property, and travel insurance.",
+        default_wait_until="domcontentloaded",
+        default_settle_ms=4_000,
+        ignore_https_errors=True,
+        skip_listing_fetch=True,
         targets={
-            "health": InsuranceSourceTarget(
-                name="health",
-                display_name="Health Insurance",
-                url="https://www.aar-insurance.com/kenya/products/health-insurance",
+            "all_products": InsuranceSourceTarget(
+                name="all_products",
+                display_name="All Products",
+                url="https://aar-insurance.com",
                 category="health",
-                description="AAR individual and family medical insurance plans.",
+                description="All AAR products: medical, accident, homeowners, landlord, WIBA, travel, marine.",
             ),
         },
     ),
@@ -308,22 +314,64 @@ INSURANCE_SOURCES: dict[str, InsuranceSourceConfig] = {
         name="apa",
         display_name="APA Insurance",
         base_url="https://www.apainsurance.org",
-        default_target="health",
-        description="APA Insurance — general and life insurance products for Kenyan individuals and businesses.",
+        default_target="all_products",
+        description="APA Insurance — general and life insurance products for Kenyan individuals and businesses. Pages protected by AWS WAF; headed browser required.",
+        default_wait_until="domcontentloaded",
+        default_settle_ms=4_000,
+        default_headless=False,
+        skip_listing_fetch=True,
         targets={
-            "health": InsuranceSourceTarget(
-                name="health",
-                display_name="Health Insurance",
-                url="https://www.apainsurance.org/products/health-insurance",
-                category="health",
-                description="APA medical and health insurance plans.",
+            "all_products": InsuranceSourceTarget(
+                name="all_products",
+                display_name="All Products",
+                url="https://www.apainsurance.org/products",
+                category="general",
+                description="All APA Insurance products: health, motor, travel, agriculture, micro.",
             ),
-            "motor": InsuranceSourceTarget(
-                name="motor",
-                display_name="Motor Insurance",
-                url="https://www.apainsurance.org/products/motor-insurance",
-                category="motor",
-                description="APA motor insurance — comprehensive and third-party.",
+        },
+    ),
+
+    "ga_insurance": InsuranceSourceConfig(
+        name="ga_insurance",
+        display_name="GA Insurance",
+        base_url="https://www.gainsuranceltd.com",
+        default_target="all_products",
+        description="GA Insurance Kenya — general, health, and specialty insurance for individuals and businesses.",
+        default_wait_until="domcontentloaded",
+        default_settle_ms=4_000,
+        skip_listing_fetch=True,
+        targets={
+            # GA uses a multi-level category structure (homepage → category pages →
+            # product pages).  The parser uses a hardcoded product URL list derived
+            # from that structure; any listing URL is accepted.
+            "all_products": InsuranceSourceTarget(
+                name="all_products",
+                display_name="All Products",
+                url="https://www.gainsuranceltd.com/ke/",
+                category="general",
+                description="All GA Insurance personal, commercial, and health products.",
+            ),
+        },
+    ),
+
+    "geminia": InsuranceSourceConfig(
+        name="geminia",
+        display_name="Geminia Insurance",
+        base_url="https://www.geminia.co.ke",
+        default_target="all_products",
+        description="Geminia Insurance — general insurance for personal, business, agribusiness, and property in Kenya.",
+        default_wait_until="domcontentloaded",
+        default_settle_ms=4_000,
+        skip_listing_fetch=True,
+        targets={
+            # parse_product_listing returns a hardcoded URL list and ignores the
+            # HTML, so any stable product page can serve as the listing URL.
+            "all_products": InsuranceSourceTarget(
+                name="all_products",
+                display_name="All Products",
+                url="https://www.geminia.co.ke/protect-yourself/motor_insurance/",
+                category="general",
+                description="All Geminia products: personal, business, agribusiness, and property protection.",
             ),
         },
     ),

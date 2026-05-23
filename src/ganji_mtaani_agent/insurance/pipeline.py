@@ -4,8 +4,12 @@ import time
 from types import ModuleType
 
 from ganji_mtaani_agent.insurance.models.product import InsuranceProduct
+from ganji_mtaani_agent.insurance.parsers import aar as _aar
+from ganji_mtaani_agent.insurance.parsers import apa as _apa
 from ganji_mtaani_agent.insurance.parsers import britam as _britam
 from ganji_mtaani_agent.insurance.parsers import cic as _cic
+from ganji_mtaani_agent.insurance.parsers import ga_insurance as _ga_insurance
+from ganji_mtaani_agent.insurance.parsers import geminia as _geminia
 from ganji_mtaani_agent.insurance.parsers import icea_lion as _icea_lion
 from ganji_mtaani_agent.insurance.parsers import jubilee as _jubilee
 from ganji_mtaani_agent.insurance.parsers import old_mutual as _old_mutual
@@ -26,12 +30,16 @@ from ganji_mtaani_agent.scrapers.browser import fetch_page
 # multiple products on one sub-category page) are handled transparently by
 # the pipeline.
 _PARSERS: dict[str, ModuleType] = {
-    "britam":     _britam,
-    "cic":        _cic,
-    "icea_lion":  _icea_lion,
-    "jubilee":    _jubilee,
-    "old_mutual": _old_mutual,
-    "sanlam":     _sanlam,
+    "aar":          _aar,
+    "apa":          _apa,
+    "britam":       _britam,
+    "cic":          _cic,
+    "ga_insurance": _ga_insurance,
+    "geminia":      _geminia,
+    "icea_lion":    _icea_lion,
+    "jubilee":      _jubilee,
+    "old_mutual":   _old_mutual,
+    "sanlam":       _sanlam,
 }
 
 
@@ -87,38 +95,51 @@ def scrape_source_target(
     source  = get_insurance_source(source_name)
     target  = get_insurance_target(source, target_name)
 
+    # Source config can force headed mode (e.g. APA's AWS WAF requires it).
+    effective_headless = headless and source.default_headless
+
     _log(verbose, f"source={source.display_name}  target={target.display_name}")
-    _log(verbose, f"fetching listing: {target.url}")
 
     # -------------------------------------------------------------------------
     # Step 1 - fetch the category listing page (with retries for slow sites)
+    # Parsers that maintain a hardcoded product URL list (e.g. GA Insurance,
+    # Geminia) set skip_listing_fetch=True and receive empty HTML instead.
     # -------------------------------------------------------------------------
-    listing = None
-    for attempt in range(1, listing_retries + 2):
-        timeout = listing_timeout_ms + (attempt - 1) * 30_000
-        listing = fetch_page(
-            target.url,
-            timeout_ms=timeout,
-            wait_until=source.default_wait_until,
-            settle_ms=source.default_settle_ms,
-            headless=headless,
-        )
-        if listing.ok:
-            break
-        if attempt <= listing_retries:
-            _log(verbose, f"listing fetch failed (attempt {attempt}), retrying in 5s...")
-            time.sleep(5)
+    listing_html = ""
 
-    if not listing.ok:
-        raise RuntimeError(f"Listing page fetch failed: {listing.error}")
+    if source.skip_listing_fetch:
+        _log(verbose, f"listing fetch skipped (hardcoded URL list)")
+    else:
+        _log(verbose, f"fetching listing: {target.url}")
+        listing = None
+        for attempt in range(1, listing_retries + 2):
+            timeout = listing_timeout_ms + (attempt - 1) * 30_000
+            listing = fetch_page(
+                target.url,
+                timeout_ms=timeout,
+                wait_until=source.default_wait_until,
+                settle_ms=source.default_settle_ms,
+                headless=effective_headless,
+                ignore_https_errors=source.ignore_https_errors,
+            )
+            if listing.ok:
+                break
+            if attempt <= listing_retries:
+                _log(verbose, f"listing fetch failed (attempt {attempt}), retrying in 5s...")
+                time.sleep(5)
 
-    for w in listing.warnings:
-        print(f"[warn] {w}")
+        if not listing.ok:
+            raise RuntimeError(f"Listing page fetch failed: {listing.error}")
+
+        for w in listing.warnings:
+            print(f"[warn] {w}")
+
+        listing_html = listing.html
 
     # -------------------------------------------------------------------------
     # Step 2 — extract product detail URLs from the listing HTML
     # -------------------------------------------------------------------------
-    product_urls = parser.parse_product_listing(listing.html, source.base_url, target.url)
+    product_urls = parser.parse_product_listing(listing_html, source.base_url, target.url)
     _log(verbose, f"found {len(product_urls)} product URLs")
 
     # -------------------------------------------------------------------------
@@ -137,7 +158,8 @@ def scrape_source_target(
             url,
             wait_until=source.default_wait_until,
             settle_ms=source.default_settle_ms,
-            headless=headless,
+            headless=effective_headless,
+            ignore_https_errors=source.ignore_https_errors,
         )
 
         if not detail.ok:
