@@ -7,6 +7,7 @@ from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import Any
 
+import altair as alt
 import pandas as pd
 import streamlit as st
 
@@ -19,6 +20,11 @@ from ganji_mtaani_agent.dashboard.data_access import (
     fetch_bookmaker_league_options,
     fetch_bookmaker_odds,
     fetch_bookmaker_source_options,
+    fetch_canonical_fixture_rows,
+    fetch_canonical_probability_breakdown,
+    fetch_canonical_source_options,
+    fetch_canonical_sport_options,
+    fetch_canonical_summary,
     fetch_flashscore_results,
     fetch_flashscore_results_sport_options,
     fetch_flashscore_results_status_options,
@@ -64,6 +70,7 @@ PAGE_BOOKMAKER  = "🎰  Bookmaker Odds"
 PAGE_FOREBET    = "📈  Forebet Predictions"
 PAGE_POLYMARKET = "🌐  Polymarket Markets"
 PAGE_RESULTS    = "⚽  Sports Results"
+PAGE_CANONICAL  = "🧩  Canonical Fixtures"
 PAGE_HISTORY    = "📚  Historical Analysis"
 PAGE_INSURANCE  = "🏥  Insurance"
 
@@ -315,7 +322,7 @@ def render_sidebar() -> str:
 
     page = st.sidebar.radio(
         "Navigate",
-        options=[PAGE_OVERVIEW, PAGE_BOOKMAKER, PAGE_FOREBET, PAGE_POLYMARKET, PAGE_RESULTS, PAGE_HISTORY, PAGE_INSURANCE],
+        options=[PAGE_OVERVIEW, PAGE_BOOKMAKER, PAGE_FOREBET, PAGE_POLYMARKET, PAGE_RESULTS, PAGE_CANONICAL, PAGE_HISTORY, PAGE_INSURANCE],
         label_visibility="collapsed",
     )
 
@@ -933,6 +940,139 @@ def render_results_page() -> None:
 
 
 # =============================================================================
+# Canonical Fixtures Page
+# =============================================================================
+def render_canonical_page() -> None:
+    st.subheader("Canonical Fixtures")
+    st.caption("Standardized fixture layer across bookmakers, Forebet, Flashscore, and results sources for monitoring and modelling.")
+
+    if not safe_table_exists("canonical_fixtures") or not safe_table_exists("fixture_source_links"):
+        st.warning("Canonical fixture tables are not available yet. Apply the canonical schema and run fixture linking first.")
+        return
+
+    sport_options = ["All", "Football", "Basketball"]
+    source_options = ["All"] + safe_rows(fetch_canonical_source_options)
+
+    c1, c2, c3 = st.columns([1, 1, 2])
+    selected_sport = c1.selectbox("Sport", options=sport_options, key="canonical_sport")
+    selected_source = c2.selectbox("Source", options=source_options, key="canonical_source")
+    search_text = c3.text_input("Search team or league", value="", key="canonical_search")
+
+    sport_filter = None if selected_sport == "All" else selected_sport
+    source_filter = None if selected_source == "All" else selected_source
+    search_filter = search_text or None
+
+    summary = fetch_canonical_summary(
+        sport=sport_filter,
+        source_name=source_filter,
+        search_text=search_filter,
+    )
+
+    total_games = int(summary.get("total_games") or 0)
+    total_predicted = int(summary.get("total_games_predicted") or 0)
+    total_results = int(summary.get("total_results") or 0)
+    total_won = int(summary.get("total_won") or 0)
+    total_lost = int(summary.get("total_lost") or 0)
+    pct_won = float(summary.get("pct_won") or 0.0)
+    pct_lost = float(summary.get("pct_lost") or 0.0)
+
+    m1, m2, m3, m4, m5, m6 = st.columns(6)
+    m1.metric("Total Games", total_games)
+    m2.metric("Games Predicted", total_predicted)
+    m3.metric("Results Rows", total_results)
+    m4.metric("Won", total_won)
+    m5.metric("Lost", total_lost)
+    m6.metric("Win Rate", f"{pct_won:.2f}%", delta=f"Loss {pct_lost:.2f}%")
+
+    probability_rows = safe_rows(
+        fetch_canonical_probability_breakdown,
+        sport=sport_filter,
+        source_name=source_filter,
+        search_text=search_filter,
+    )
+    if probability_rows:
+        st.markdown("### Forebet Probability Buckets")
+        probability_frame = pd.DataFrame(probability_rows)
+        chart_frame = probability_frame.melt(
+            id_vars=["probability_bucket"],
+            value_vars=["won_count", "lost_count"],
+            var_name="outcome_type",
+            value_name="match_count",
+        )
+        chart_frame["outcome_type"] = chart_frame["outcome_type"].map(
+            {"won_count": "Won", "lost_count": "Lost"}
+        )
+        probability_chart = (
+            alt.Chart(chart_frame)
+            .mark_bar()
+            .encode(
+                x=alt.X("probability_bucket:N", title="Probability Bucket", sort=None),
+                y=alt.Y("match_count:Q", title="Match Count"),
+                color=alt.Color(
+                    "outcome_type:N",
+                    title="Outcome",
+                    scale=alt.Scale(domain=["Won", "Lost"], range=["#2563eb", "#dc2626"]),
+                ),
+                tooltip=["probability_bucket", "outcome_type", "match_count"],
+            )
+        )
+        st.altair_chart(probability_chart, use_container_width=True)
+        st.dataframe(
+            probability_frame,
+            use_container_width=True,
+            hide_index=True,
+            column_config={
+                "probability_bucket": "Probability Bucket",
+                "won_count": st.column_config.NumberColumn("Won"),
+                "lost_count": st.column_config.NumberColumn("Lost"),
+                "total_decided": st.column_config.NumberColumn("Decided"),
+            },
+        )
+    else:
+        st.info("No Forebet prediction/result overlap is available yet for the current canonical filters.")
+
+    st.markdown("### Canonical Fixture Table")
+    canonical_rows = safe_rows(
+        fetch_canonical_fixture_rows,
+        sport=sport_filter,
+        source_name=source_filter,
+        search_text=search_filter,
+        limit=500,
+    )
+
+    if canonical_rows:
+        st.dataframe(
+            canonical_rows,
+            use_container_width=True,
+            hide_index=True,
+            column_config={
+                "id": st.column_config.NumberColumn("Fixture ID", width="small"),
+                "sport": "Sport",
+                "canonical_event_date": "Event Date",
+                "canonical_event_time_text": "Event Time",
+                "canonical_league": "League",
+                "canonical_home_team": "Home",
+                "canonical_away_team": "Away",
+                "linked_rows": st.column_config.NumberColumn("Link Rows", width="small"),
+                "source_count": st.column_config.NumberColumn("Sources", width="small"),
+                "linked_sources": "Linked Sources",
+                "pred_outcome": "Forebet Pred",
+                "pred_probability": st.column_config.NumberColumn("Pred %", format="%.2f"),
+                "correct_score_text": "Correct Score",
+                "result_home_score": st.column_config.NumberColumn("H", width="small"),
+                "result_away_score": st.column_config.NumberColumn("A", width="small"),
+                "primary_result_source": "Result Source",
+                "actual_outcome": "Actual",
+                "pred_hit": "Pred Hit",
+                "confidence": st.column_config.NumberColumn("Conf", format="%.2f"),
+                "updated_at": st.column_config.DatetimeColumn("Updated"),
+            },
+        )
+    else:
+        st.info("No canonical fixtures matched the current filters.")
+
+
+# =============================================================================
 # Historical Analysis Page
 # =============================================================================
 def render_historical_page() -> None:
@@ -1279,6 +1419,7 @@ def main() -> None:
     elif page == PAGE_FOREBET:    render_forebet_page()
     elif page == PAGE_POLYMARKET: render_polymarket_page()
     elif page == PAGE_RESULTS:    render_results_page()
+    elif page == PAGE_CANONICAL:  render_canonical_page()
     elif page == PAGE_HISTORY:    render_historical_page()
     elif page == PAGE_INSURANCE:  render_insurance_page()
     else:

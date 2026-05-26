@@ -5,6 +5,7 @@ from datetime import date, datetime
 from typing import Any, Sequence
 
 from psycopg import Connection
+from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 
 from ganji_mtaani_agent.insurance.models.product import InsuranceProduct
@@ -860,6 +861,216 @@ def upsert_forebet_match_history_rows(
                 detail_url = EXCLUDED.detail_url,
                 raw_text = EXCLUDED.raw_text,
                 scraped_at = NOW()
+            """,
+            prepared_rows,
+        )
+
+    return len(prepared_rows)
+
+
+def fetch_forebet_history_candidates(
+    connection: Connection,
+    *,
+    sport: str,
+    limit: int | None = None,
+) -> list[dict[str, Any]]:
+    """Return Forebet match URLs that still need automatic historical enrichment."""
+
+    sql = """
+        WITH candidate_rows AS (
+            SELECT
+                sport,
+                match_url,
+                event_datetime_text,
+                home_team,
+                away_team,
+                created_at
+            FROM forebet_predictions
+            WHERE sport = %s
+              AND match_url IS NOT NULL
+
+            UNION ALL
+
+            SELECT
+                sport,
+                match_url,
+                event_datetime_text,
+                home_team,
+                away_team,
+                created_at
+            FROM forebet_results
+            WHERE sport = %s
+              AND match_url IS NOT NULL
+        )
+        SELECT
+            candidates.sport,
+            candidates.match_url,
+            MAX(candidates.event_datetime_text) AS event_datetime_text,
+            MAX(candidates.home_team) AS home_team,
+            MAX(candidates.away_team) AS away_team,
+            MAX(candidates.created_at) AS latest_seen_at
+        FROM candidate_rows AS candidates
+        LEFT JOIN forebet_match_analyses AS analyses
+            ON analyses.source_name = 'forebet'
+           AND analyses.sport = candidates.sport
+           AND analyses.match_url = candidates.match_url
+        WHERE analyses.id IS NULL
+        GROUP BY candidates.sport, candidates.match_url
+        ORDER BY MAX(candidates.created_at) DESC, MAX(candidates.event_datetime_text) DESC NULLS LAST
+    """
+
+    params: list[Any] = [sport, sport]
+    if limit is not None and limit > 0:
+        sql += "\nLIMIT %s"
+        params.append(limit)
+
+    with connection.cursor(row_factory=dict_row) as cursor:
+        cursor.execute(sql, tuple(params))
+        return [dict(row) for row in cursor.fetchall()]
+
+
+def upsert_canonical_fixture(
+    connection: Connection,
+    *,
+    sport: str,
+    canonical_league: str | None,
+    canonical_home_team: str,
+    canonical_away_team: str,
+    canonical_event_date: date,
+    canonical_event_datetime_utc: datetime | None = None,
+    canonical_event_datetime_text: str | None = None,
+    canonical_event_time_text: str | None = None,
+    canonical_status: str | None = None,
+    result_home_score: int | None = None,
+    result_away_score: int | None = None,
+    primary_result_source: str | None = None,
+    confidence: float = 1.0,
+) -> int:
+    """Insert or update one canonical fixture row and return its id."""
+
+    with connection.cursor() as cursor:
+        cursor.execute(
+            """
+            INSERT INTO canonical_fixtures (
+                sport,
+                canonical_league,
+                canonical_home_team,
+                canonical_away_team,
+                canonical_event_date,
+                canonical_event_datetime_utc,
+                canonical_event_datetime_text,
+                canonical_event_time_text,
+                canonical_status,
+                result_home_score,
+                result_away_score,
+                primary_result_source,
+                confidence
+            )
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            ON CONFLICT (sport, canonical_event_date, canonical_home_team, canonical_away_team)
+            DO UPDATE SET
+                canonical_league = COALESCE(EXCLUDED.canonical_league, canonical_fixtures.canonical_league),
+                canonical_event_datetime_utc = COALESCE(EXCLUDED.canonical_event_datetime_utc, canonical_fixtures.canonical_event_datetime_utc),
+                canonical_event_datetime_text = COALESCE(EXCLUDED.canonical_event_datetime_text, canonical_fixtures.canonical_event_datetime_text),
+                canonical_event_time_text = COALESCE(EXCLUDED.canonical_event_time_text, canonical_fixtures.canonical_event_time_text),
+                canonical_status = COALESCE(EXCLUDED.canonical_status, canonical_fixtures.canonical_status),
+                result_home_score = COALESCE(EXCLUDED.result_home_score, canonical_fixtures.result_home_score),
+                result_away_score = COALESCE(EXCLUDED.result_away_score, canonical_fixtures.result_away_score),
+                primary_result_source = COALESCE(EXCLUDED.primary_result_source, canonical_fixtures.primary_result_source),
+                confidence = GREATEST(EXCLUDED.confidence, canonical_fixtures.confidence),
+                updated_at = NOW()
+            RETURNING id
+            """,
+            (
+                sport,
+                canonical_league,
+                canonical_home_team,
+                canonical_away_team,
+                canonical_event_date,
+                canonical_event_datetime_utc,
+                canonical_event_datetime_text,
+                canonical_event_time_text,
+                canonical_status,
+                result_home_score,
+                result_away_score,
+                primary_result_source,
+                confidence,
+            ),
+        )
+        return int(cursor.fetchone()[0])
+
+
+def upsert_fixture_source_links(
+    connection: Connection,
+    *,
+    rows: Sequence[dict[str, Any]],
+) -> int:
+    """Insert or update raw-source-to-canonical-fixture links."""
+
+    prepared_rows: list[tuple[Any, ...]] = []
+    for row in rows:
+        prepared_rows.append(
+            (
+                row["fixture_id"],
+                row["source_name"],
+                row["source_table"],
+                row["source_row_id"],
+                row.get("source_run_id"),
+                row.get("source_match_url"),
+                row["source_sport"],
+                row.get("source_league"),
+                row["source_home_team"],
+                row["source_away_team"],
+                row.get("source_event_date"),
+                row.get("source_event_datetime_text"),
+                row.get("source_event_time_text"),
+                row["link_method"],
+                row.get("link_confidence", 1.0),
+            )
+        )
+
+    if not prepared_rows:
+        return 0
+
+    with connection.cursor() as cursor:
+        cursor.executemany(
+            """
+            INSERT INTO fixture_source_links (
+                fixture_id,
+                source_name,
+                source_table,
+                source_row_id,
+                source_run_id,
+                source_match_url,
+                source_sport,
+                source_league,
+                source_home_team,
+                source_away_team,
+                source_event_date,
+                source_event_datetime_text,
+                source_event_time_text,
+                link_method,
+                link_confidence
+            )
+            VALUES (
+                %s, %s, %s, %s, %s, %s, %s,
+                %s, %s, %s, %s, %s, %s, %s, %s
+            )
+            ON CONFLICT (source_table, source_row_id)
+            DO UPDATE SET
+                fixture_id = EXCLUDED.fixture_id,
+                source_name = EXCLUDED.source_name,
+                source_run_id = EXCLUDED.source_run_id,
+                source_match_url = EXCLUDED.source_match_url,
+                source_sport = EXCLUDED.source_sport,
+                source_league = EXCLUDED.source_league,
+                source_home_team = EXCLUDED.source_home_team,
+                source_away_team = EXCLUDED.source_away_team,
+                source_event_date = EXCLUDED.source_event_date,
+                source_event_datetime_text = EXCLUDED.source_event_datetime_text,
+                source_event_time_text = EXCLUDED.source_event_time_text,
+                link_method = EXCLUDED.link_method,
+                link_confidence = EXCLUDED.link_confidence
             """,
             prepared_rows,
         )

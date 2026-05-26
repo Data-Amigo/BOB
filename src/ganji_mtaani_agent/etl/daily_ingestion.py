@@ -16,8 +16,10 @@ from ganji_mtaani_agent.models.polymarket_fetch import PolymarketFetchConfig
 from ganji_mtaani_agent.parsers.betika import parse_betika_basketball, parse_betika_football
 from ganji_mtaani_agent.parsers.forebet import (
     parse_forebet_basketball,
+    parse_forebet_basketball_historical_page,
     parse_forebet_basketball_yesterday,
     parse_forebet_football,
+    parse_forebet_football_historical_page,
     parse_forebet_football_yesterday,
 )
 from ganji_mtaani_agent.parsers.flashscore import parse_flashscore_basketball, parse_flashscore_football
@@ -42,6 +44,9 @@ insert_ingestion_batch = repositories_module.insert_ingestion_batch
 insert_source_run = repositories_module.insert_source_run
 update_ingestion_batch = repositories_module.update_ingestion_batch
 update_source_run = repositories_module.update_source_run
+fetch_forebet_history_candidates = repositories_module.fetch_forebet_history_candidates
+upsert_forebet_match_analysis = repositories_module.upsert_forebet_match_analysis
+upsert_forebet_match_history_rows = repositories_module.upsert_forebet_match_history_rows
 upsert_forebet_results = repositories_module.upsert_forebet_results
 upsert_flashscore_results = repositories_module.upsert_flashscore_results
 upsert_polymarket_markets = repositories_module.upsert_polymarket_markets
@@ -98,6 +103,7 @@ class DailyIngestionConfig:
     triggered_by: str = "streamlit_manual"
     bookmaker_limit: int | None = None
     forebet_limit: int | None = None
+    forebet_history_limit: int = 50
     polymarket_limit: int = 500
     polymarket_scan_limit: int = 2_000
     results_limit: int | None = None
@@ -111,7 +117,10 @@ class DailyIngestionConfig:
 def get_daily_task_catalog() -> list[dict[str, str]]:
     """Return ordered task metadata for selective ingestion controls."""
 
-    return [{"task_name": task_name, "display_name": display_name} for task_name, display_name in DAILY_TASK_CATALOG]
+    catalog = [{"task_name": task_name, "display_name": display_name} for task_name, display_name in DAILY_TASK_CATALOG]
+    catalog.insert(10, {"task_name": "forebet_football_history", "display_name": "Forebet Football Historical Enrichment"})
+    catalog.insert(11, {"task_name": "forebet_basketball_history", "display_name": "Forebet Basketball Historical Enrichment"})
+    return catalog
 
 
 def _normalized_text(value: str | None) -> str:
@@ -165,14 +174,14 @@ def _dedupe_forebet_results(rows: list[object]) -> list[object]:
             _normalized_text(getattr(row, "league", None)),
             _normalized_text(getattr(row, "home_team", None)),
             _normalized_text(getattr(row, "away_team", None)),
-            _normalized_text(getattr(row, "event_datetime_text", None)),
+            _normalized_text(getattr(row, "event_datetime", None)),
         )
         deduped.setdefault(key, row)
 
     return sorted(
         deduped.values(),
         key=lambda row: (
-            _normalized_text(getattr(row, "event_datetime_text", None)),
+            _normalized_text(getattr(row, "event_datetime", None)),
             _normalized_text(getattr(row, "league", None)),
             _normalized_text(getattr(row, "home_team", None)),
             _normalized_text(getattr(row, "away_team", None)),
@@ -729,6 +738,156 @@ def _run_forebet_results_task(
         raise
 
 
+def _run_forebet_history_enrichment_task(
+    connection: Connection,
+    *,
+    batch_id: int,
+    sport: str,
+    limit: int,
+) -> dict[str, Any]:
+    """Enrich stored Forebet match URLs with detail-page history for modelling."""
+
+    source = get_source_config("forebet")
+    target_name = f"{sport}_history"
+    started_at = datetime.now(UTC)
+    timer_start = perf_counter()
+    run_id = insert_source_run(
+        connection,
+        batch_id=batch_id,
+        source_name=source.name,
+        target_name=target_name,
+        source_type="browser",
+        status="running",
+        started_at=started_at,
+        metadata_json={
+            "sport": sport,
+            "history_limit": limit,
+            "headless": source.default_headless,
+            "settle_ms": source.default_settle_ms,
+        },
+    )
+
+    try:
+        candidates = fetch_forebet_history_candidates(connection, sport=sport, limit=limit)
+        if not candidates:
+            _finalize_source_run(
+                connection,
+                run_id,
+                status="success",
+                started_counter=timer_start,
+                records_found=0,
+                warnings_count=0,
+                metadata_json={
+                    "sport": sport,
+                    "history_limit": limit,
+                    "candidate_count": 0,
+                    "enriched_count": 0,
+                    "history_rows_saved": 0,
+                },
+            )
+            return {
+                "source_name": source.name,
+                "target_name": target_name,
+                "status": "success",
+                "records_found": 0,
+                "run_id": run_id,
+            }
+
+        parser_fn = (
+            parse_forebet_basketball_historical_page
+            if sport == "basketball"
+            else parse_forebet_football_historical_page
+        )
+
+        page_summaries: list[dict[str, Any]] = []
+        failed_urls: list[dict[str, str]] = []
+        total_warning_count = 0
+        enriched_count = 0
+        history_rows_saved = 0
+
+        for candidate in candidates:
+            match_url = str(candidate["match_url"])
+            result = fetch_page(
+                match_url,
+                timeout_ms=60_000,
+                wait_until=source.default_wait_until,
+                settle_ms=source.default_settle_ms,
+                headless=source.default_headless,
+            )
+            total_warning_count += len(result.warnings)
+
+            if result.error:
+                failed_urls.append({"match_url": match_url, "error": result.error})
+                page_summaries.append({"match_url": match_url, "status": "failed", "error": result.error})
+                continue
+
+            analysis, history_rows = parser_fn(result.html, match_url=match_url)
+            if analysis is None:
+                error_message = "The historical parser could not extract a match summary."
+                failed_urls.append({"match_url": match_url, "error": error_message})
+                page_summaries.append({"match_url": match_url, "status": "failed", "error": error_message})
+                continue
+
+            analysis_id = upsert_forebet_match_analysis(connection, analysis=analysis)
+            saved_count = upsert_forebet_match_history_rows(connection, rows=history_rows)
+            enriched_count += 1
+            history_rows_saved += saved_count
+            page_summaries.append(
+                {
+                    "match_url": match_url,
+                    "status": "success",
+                    "analysis_id": analysis_id,
+                    "home_team": analysis.home_team,
+                    "away_team": analysis.away_team,
+                    "history_rows_saved": saved_count,
+                    "warnings": result.warnings,
+                }
+            )
+
+        if enriched_count == 0 and failed_urls:
+            raise RuntimeError("Forebet historical enrichment failed for all queued match URLs.")
+
+        final_status = "partial_success" if failed_urls else "success"
+        _finalize_source_run(
+            connection,
+            run_id,
+            status=final_status,
+            started_counter=timer_start,
+            records_found=enriched_count,
+            warnings_count=total_warning_count + len(failed_urls),
+            metadata_json={
+                "sport": sport,
+                "history_limit": limit,
+                "candidate_count": len(candidates),
+                "enriched_count": enriched_count,
+                "history_rows_saved": history_rows_saved,
+                "failed_urls": failed_urls,
+                "page_summaries": page_summaries,
+            },
+        )
+        return {
+            "source_name": source.name,
+            "target_name": target_name,
+            "status": final_status,
+            "records_found": enriched_count,
+            "run_id": run_id,
+        }
+    except Exception as exc:
+        _finalize_source_run(
+            connection,
+            run_id,
+            status="failed",
+            started_counter=timer_start,
+            warnings_count=0,
+            error_message=str(exc),
+            metadata_json={
+                "sport": sport,
+                "history_limit": limit,
+            },
+        )
+        raise
+
+
 def _run_flashscore_results_task(
     connection: Connection,
     *,
@@ -836,6 +995,8 @@ def build_daily_task_specs(
         ("forebet_basketball", lambda: _run_forebet_task(connection, batch_id=batch_id, target_name="basketball_today", limit=config.forebet_limit)),
         ("forebet_football_yesterday_results", lambda: _run_forebet_results_task(connection, batch_id=batch_id, target_name="football_yesterday")),
         ("forebet_basketball_yesterday_results", lambda: _run_forebet_results_task(connection, batch_id=batch_id, target_name="basketball_yesterday")),
+        ("forebet_football_history", lambda: _run_forebet_history_enrichment_task(connection, batch_id=batch_id, sport="football", limit=config.forebet_history_limit)),
+        ("forebet_basketball_history", lambda: _run_forebet_history_enrichment_task(connection, batch_id=batch_id, sport="basketball", limit=config.forebet_history_limit)),
         ("flashscore_football_yesterday_results", lambda: _run_flashscore_results_task(connection, batch_id=batch_id, target_name="football_yesterday_results", days_back=config.flashscore_days_back)),
         ("flashscore_basketball_yesterday_results", lambda: _run_flashscore_results_task(connection, batch_id=batch_id, target_name="basketball_yesterday_results", days_back=config.flashscore_days_back)),
         ("polymarket_markets", lambda: _run_polymarket_task(connection, batch_id=batch_id, limit=config.polymarket_limit, scan_limit=config.polymarket_scan_limit)),
@@ -864,6 +1025,7 @@ def run_daily_ingestion(config: DailyIngestionConfig) -> dict[str, Any]:
             metadata_json={
                 "bookmaker_limit": config.bookmaker_limit,
                 "forebet_limit": config.forebet_limit,
+                "forebet_history_limit": config.forebet_history_limit,
                 "polymarket_limit": config.polymarket_limit,
                 "polymarket_scan_limit": config.polymarket_scan_limit,
                 "results_limit": config.results_limit,
@@ -914,6 +1076,7 @@ def run_daily_ingestion(config: DailyIngestionConfig) -> dict[str, Any]:
             metadata_json={
                 "bookmaker_limit": config.bookmaker_limit,
                 "forebet_limit": config.forebet_limit,
+                "forebet_history_limit": config.forebet_history_limit,
                 "polymarket_limit": config.polymarket_limit,
                 "polymarket_scan_limit": config.polymarket_scan_limit,
                 "results_limit": config.results_limit,

@@ -1,11 +1,14 @@
 from ganji_mtaani_agent.db.postgres import PostgresConfig, get_postgres_connection
 from ganji_mtaani_agent.db.repositories import (
+    fetch_forebet_history_candidates,
     insert_bookmaker_odds,
     insert_forebet_predictions,
     insert_ingestion_batch,
     insert_source_run,
+    upsert_canonical_fixture,
     upsert_forebet_match_analysis,
     upsert_forebet_match_history_rows,
+    upsert_fixture_source_links,
     upsert_flashscore_results,
     upsert_forebet_results,
     upsert_sports_results,
@@ -16,13 +19,16 @@ from ganji_mtaani_agent.db.repositories import (
 
 __all__ = [
     "PostgresConfig",
+    "fetch_forebet_history_candidates",
     "get_postgres_connection",
     "insert_bookmaker_odds",
     "insert_forebet_predictions",
     "insert_ingestion_batch",
     "insert_source_run",
+    "upsert_canonical_fixture",
     "upsert_forebet_match_analysis",
     "upsert_forebet_match_history_rows",
+    "upsert_fixture_source_links",
     "upsert_flashscore_results",
     "upsert_forebet_results",
     "upsert_polymarket_markets",

@@ -19,6 +19,18 @@ def clear_all_caches() -> None:
     st.cache_data.clear()
 
 
+def _canonical_sport_aliases(sport: str | None) -> list[str] | None:
+    if not sport or sport == "All":
+        return None
+
+    normalized = str(sport).strip().casefold()
+    if normalized in {"football", "soccer"}:
+        return ["football", "soccer"]
+    if normalized == "basketball":
+        return ["basketball"]
+    return [normalized]
+
+
 @st.cache_data(ttl=30)
 def table_exists(table_name: str) -> bool:
     rows = _fetch_all("SELECT to_regclass(%s) AS relation_name", (f"public.{table_name}",))
@@ -481,6 +493,345 @@ def fetch_forebet_match_history_rows(*, match_url: str, section_name: str | None
         FROM forebet_match_history_rows
         {where_sql}
         ORDER BY section_name, section_team, sequence_no
+        """,
+        params,
+    )
+
+
+# =============================================================================
+# Canonical Fixtures Data Access
+# =============================================================================
+def _canonical_filters(
+    *,
+    sport: str | None = None,
+    source_name: str | None = None,
+    search_text: str | None = None,
+) -> tuple[list[str], list[Any]]:
+    clauses: list[str] = []
+    params: list[Any] = []
+
+    sport_aliases = _canonical_sport_aliases(sport)
+    if sport_aliases:
+        clauses.append("LOWER(cf.sport) = ANY(%s)")
+        params.append(sport_aliases)
+    if source_name:
+        clauses.append(
+            """
+            EXISTS (
+                SELECT 1
+                FROM fixture_source_links AS source_filter
+                WHERE source_filter.fixture_id = cf.id
+                  AND source_filter.source_name = %s
+            )
+            """
+        )
+        params.append(source_name)
+    if search_text:
+        search_value = f"%{search_text}%"
+        clauses.append(
+            """
+            (
+                cf.canonical_home_team ILIKE %s
+                OR cf.canonical_away_team ILIKE %s
+                OR COALESCE(cf.canonical_league, '') ILIKE %s
+            )
+            """
+        )
+        params.extend([search_value, search_value, search_value])
+
+    return clauses, params
+
+
+@st.cache_data(ttl=300)
+def fetch_canonical_sport_options() -> list[str]:
+    rows = _fetch_all("SELECT DISTINCT LOWER(sport) AS sport FROM canonical_fixtures ORDER BY 1")
+    sports = {str(row["sport"]) for row in rows if row.get("sport")}
+    options: list[str] = []
+    if sports.intersection({"football", "soccer"}):
+        options.append("Football")
+    if "basketball" in sports:
+        options.append("Basketball")
+    return options
+
+
+@st.cache_data(ttl=300)
+def fetch_canonical_source_options() -> list[str]:
+    rows = _fetch_all("SELECT DISTINCT source_name FROM fixture_source_links ORDER BY source_name")
+    return [str(row["source_name"]) for row in rows if row.get("source_name")]
+
+
+@st.cache_data(ttl=120)
+def fetch_canonical_summary(
+    *,
+    sport: str | None = None,
+    source_name: str | None = None,
+    search_text: str | None = None,
+) -> dict[str, Any]:
+    clauses, params = _canonical_filters(sport=sport, source_name=source_name, search_text=search_text)
+    where_sql = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+    canonical_rows = _fetch_all(
+        f"""
+        WITH filtered_fixtures AS (
+            SELECT cf.*
+            FROM canonical_fixtures AS cf
+            {where_sql}
+        )
+        SELECT
+            COUNT(*) AS total_games,
+            COUNT(*) FILTER (
+                WHERE EXISTS (
+                    SELECT 1
+                    FROM fixture_source_links AS pred_links
+                    WHERE pred_links.fixture_id = filtered_fixtures.id
+                      AND pred_links.source_table IN ('forebet_predictions', 'forebet_results')
+                )
+            ) AS total_games_predicted,
+            COUNT(*) FILTER (
+                WHERE EXISTS (
+                    SELECT 1
+                    FROM fixture_source_links AS result_links
+                    WHERE result_links.fixture_id = filtered_fixtures.id
+                      AND result_links.source_table IN ('forebet_results', 'flashscore_results', 'sports_results')
+                )
+            ) AS total_results
+        FROM filtered_fixtures
+        """,
+        params,
+    )
+    summary = canonical_rows[0] if canonical_rows else {}
+
+    if source_name and source_name not in {"forebet", "forebet_results", "All"}:
+        summary["total_won"] = 0
+        summary["total_lost"] = 0
+        summary["pct_won"] = 0
+        summary["pct_lost"] = 0
+        return summary
+
+    forebet_clauses: list[str] = []
+    forebet_params: list[Any] = []
+    sport_aliases = _canonical_sport_aliases(sport)
+    if sport_aliases:
+        forebet_clauses.append("LOWER(sport) = ANY(%s)")
+        forebet_params.append(sport_aliases)
+    if search_text:
+        search_value = f"%{search_text}%"
+        forebet_clauses.append("(home_team ILIKE %s OR away_team ILIKE %s OR league ILIKE %s)")
+        forebet_params.extend([search_value, search_value, search_value])
+    forebet_where_sql = f"WHERE {' AND '.join(forebet_clauses)}" if forebet_clauses else ""
+
+    forebet_rows = _fetch_all(
+        f"""
+        SELECT
+            COUNT(*) FILTER (WHERE pred_hit IS TRUE) AS total_won,
+            COUNT(*) FILTER (WHERE pred_hit IS FALSE) AS total_lost,
+            COUNT(*) FILTER (WHERE pred_hit IS NOT NULL) AS evaluated_rows
+        FROM forebet_results
+        {forebet_where_sql}
+        """,
+        forebet_params,
+    )
+    forebet_summary = forebet_rows[0] if forebet_rows else {}
+    total_won = int(forebet_summary.get("total_won") or 0)
+    total_lost = int(forebet_summary.get("total_lost") or 0)
+    evaluated_rows = int(forebet_summary.get("evaluated_rows") or 0)
+
+    summary["total_won"] = total_won
+    summary["total_lost"] = total_lost
+    summary["pct_won"] = round((100.0 * total_won / evaluated_rows), 2) if evaluated_rows else 0
+    summary["pct_lost"] = round((100.0 * total_lost / evaluated_rows), 2) if evaluated_rows else 0
+    return summary
+
+
+@st.cache_data(ttl=120)
+def fetch_canonical_probability_breakdown(
+    *,
+    sport: str | None = None,
+    source_name: str | None = None,
+    search_text: str | None = None,
+) -> list[dict[str, Any]]:
+    if source_name and source_name not in {"forebet", "forebet_results", "All"}:
+        return []
+
+    clauses: list[str] = []
+    params: list[Any] = []
+    sport_aliases = _canonical_sport_aliases(sport)
+    if sport_aliases:
+        clauses.append("LOWER(sport) = ANY(%s)")
+        params.append(sport_aliases)
+    if search_text:
+        search_value = f"%{search_text}%"
+        clauses.append("(home_team ILIKE %s OR away_team ILIKE %s OR league ILIKE %s)")
+        params.extend([search_value, search_value, search_value])
+    where_sql = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+
+    return _fetch_all(
+        f"""
+        WITH evaluated AS (
+            SELECT
+                pred_outcome,
+                CASE
+                    WHEN pred_outcome = '1' THEN prob_1
+                    WHEN pred_outcome = 'X' THEN prob_x
+                    WHEN pred_outcome = '2' THEN prob_2
+                    ELSE NULL
+                END AS pred_probability,
+                pred_hit
+            FROM forebet_results
+            {where_sql}
+        ),
+        bucketed AS (
+            SELECT
+                CASE
+                    WHEN pred_probability < 40 THEN '<40%%'
+                    WHEN pred_probability < 50 THEN '40-50%%'
+                    WHEN pred_probability < 60 THEN '50-60%%'
+                    WHEN pred_probability < 70 THEN '60-70%%'
+                    WHEN pred_probability < 80 THEN '70-80%%'
+                    WHEN pred_probability < 90 THEN '80-90%%'
+                    ELSE '90-100%%'
+                END AS probability_bucket,
+                CASE
+                    WHEN pred_probability < 40 THEN 0
+                    WHEN pred_probability < 50 THEN 1
+                    WHEN pred_probability < 60 THEN 2
+                    WHEN pred_probability < 70 THEN 3
+                    WHEN pred_probability < 80 THEN 4
+                    WHEN pred_probability < 90 THEN 5
+                    ELSE 6
+                END AS bucket_order,
+                pred_hit
+            FROM evaluated
+            WHERE pred_probability IS NOT NULL
+              AND pred_hit IS NOT NULL
+        )
+        SELECT
+            probability_bucket,
+            COUNT(*) FILTER (WHERE pred_hit IS TRUE) AS won_count,
+            COUNT(*) FILTER (WHERE pred_hit IS FALSE) AS lost_count,
+            COUNT(*) AS total_decided
+        FROM bucketed
+        GROUP BY probability_bucket, bucket_order
+        ORDER BY bucket_order
+        """,
+        params,
+    )
+
+
+@st.cache_data(ttl=120)
+def fetch_canonical_fixture_rows(
+    *,
+    sport: str | None = None,
+    source_name: str | None = None,
+    search_text: str | None = None,
+    limit: int = 500,
+) -> list[dict[str, Any]]:
+    clauses, params = _canonical_filters(sport=sport, source_name=source_name, search_text=search_text)
+    where_sql = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+    params.append(limit)
+
+    return _fetch_all(
+        f"""
+        WITH filtered_fixtures AS (
+            SELECT cf.*
+            FROM canonical_fixtures AS cf
+            {where_sql}
+        ),
+        fixture_sources AS (
+            SELECT
+                fsl.fixture_id,
+                COUNT(*) AS linked_rows,
+                COUNT(DISTINCT fsl.source_name) AS source_count,
+                STRING_AGG(DISTINCT fsl.source_name, ', ' ORDER BY fsl.source_name) AS linked_sources
+            FROM fixture_source_links AS fsl
+            WHERE fsl.fixture_id IN (SELECT id FROM filtered_fixtures)
+            GROUP BY fsl.fixture_id
+        ),
+        ranked_forebet_predictions AS (
+            SELECT DISTINCT ON (fsl.fixture_id)
+                fsl.fixture_id,
+                fp.pred_outcome,
+                fp.correct_score_text,
+                CASE
+                    WHEN fp.pred_outcome = '1' THEN fp.prob_1
+                    WHEN fp.pred_outcome = 'X' THEN fp.prob_x
+                    WHEN fp.pred_outcome = '2' THEN fp.prob_2
+                    ELSE NULL
+                END AS pred_probability
+            FROM fixture_source_links AS fsl
+            JOIN forebet_predictions AS fp
+                ON fp.id = fsl.source_row_id
+            WHERE fsl.source_table = 'forebet_predictions'
+              AND fsl.fixture_id IN (SELECT id FROM filtered_fixtures)
+            ORDER BY fsl.fixture_id, fp.created_at DESC, fp.id DESC
+        ),
+        ranked_forebet_results AS (
+            SELECT DISTINCT ON (fsl.fixture_id)
+                fsl.fixture_id,
+                fr.pred_outcome,
+                fr.predicted_score_text,
+                fr.pred_hit,
+                CASE
+                    WHEN fr.pred_outcome = '1' THEN fr.prob_1
+                    WHEN fr.pred_outcome = 'X' THEN fr.prob_x
+                    WHEN fr.pred_outcome = '2' THEN fr.prob_2
+                    ELSE NULL
+                END AS pred_probability
+            FROM fixture_source_links AS fsl
+            JOIN forebet_results AS fr
+                ON fr.id = fsl.source_row_id
+            WHERE fsl.source_table = 'forebet_results'
+              AND fsl.fixture_id IN (SELECT id FROM filtered_fixtures)
+            ORDER BY fsl.fixture_id, fr.created_at DESC, fr.id DESC
+        )
+        SELECT
+            ff.id,
+            ff.sport,
+            ff.canonical_event_date,
+            ff.canonical_event_time_text,
+            ff.canonical_league,
+            ff.canonical_home_team,
+            ff.canonical_away_team,
+            fs.linked_rows,
+            fs.source_count,
+            fs.linked_sources,
+            COALESCE(rfr.pred_outcome, rfp.pred_outcome) AS pred_outcome,
+            COALESCE(rfr.pred_probability, rfp.pred_probability) AS pred_probability,
+            COALESCE(rfr.predicted_score_text, rfp.correct_score_text) AS correct_score_text,
+            ff.result_home_score,
+            ff.result_away_score,
+            ff.primary_result_source,
+            CASE
+                WHEN ff.result_home_score IS NULL OR ff.result_away_score IS NULL THEN NULL
+                WHEN ff.result_home_score > ff.result_away_score THEN '1'
+                WHEN ff.result_home_score < ff.result_away_score THEN '2'
+                ELSE 'X'
+            END AS actual_outcome,
+            COALESCE(
+                rfr.pred_hit,
+                CASE
+                    WHEN rfp.pred_outcome IS NULL THEN NULL
+                    WHEN ff.result_home_score IS NULL OR ff.result_away_score IS NULL THEN NULL
+                    WHEN (
+                        CASE
+                            WHEN ff.result_home_score > ff.result_away_score THEN '1'
+                            WHEN ff.result_home_score < ff.result_away_score THEN '2'
+                            ELSE 'X'
+                        END
+                    ) = rfp.pred_outcome THEN TRUE
+                    ELSE FALSE
+                END
+            ) AS pred_hit,
+            ff.confidence,
+            ff.updated_at
+        FROM filtered_fixtures AS ff
+        LEFT JOIN fixture_sources AS fs
+            ON fs.fixture_id = ff.id
+        LEFT JOIN ranked_forebet_predictions AS rfp
+            ON rfp.fixture_id = ff.id
+        LEFT JOIN ranked_forebet_results AS rfr
+            ON rfr.fixture_id = ff.id
+        ORDER BY ff.canonical_event_date DESC, ff.id DESC
+        LIMIT %s
         """,
         params,
     )
