@@ -993,6 +993,10 @@ def render_canonical_page() -> None:
     if probability_rows:
         st.markdown("### Forebet Probability Buckets")
         probability_frame = pd.DataFrame(probability_rows)
+        probability_frame["win_pct"] = (
+            probability_frame["won_count"] / probability_frame["total_decided"].replace(0, pd.NA) * 100.0
+        ).fillna(0.0)
+        probability_frame["loss_pct"] = 100.0 - probability_frame["win_pct"]
         chart_frame = probability_frame.melt(
             id_vars=["probability_bucket"],
             value_vars=["won_count", "lost_count"],
@@ -1002,7 +1006,7 @@ def render_canonical_page() -> None:
         chart_frame["outcome_type"] = chart_frame["outcome_type"].map(
             {"won_count": "Won", "lost_count": "Lost"}
         )
-        probability_chart = (
+        bar_chart = (
             alt.Chart(chart_frame)
             .mark_bar()
             .encode(
@@ -1016,6 +1020,30 @@ def render_canonical_page() -> None:
                 tooltip=["probability_bucket", "outcome_type", "match_count"],
             )
         )
+        line_base = alt.Chart(probability_frame).encode(
+            x=alt.X("probability_bucket:N", sort=None),
+            y=alt.Y(
+                "win_pct:Q",
+                title="Win Rate (%)",
+                axis=alt.Axis(orient="right", format=".0f"),
+                scale=alt.Scale(domain=[0, 100]),
+            ),
+            tooltip=[
+                alt.Tooltip("probability_bucket:N", title="Probability Bucket"),
+                alt.Tooltip("won_count:Q", title="Won"),
+                alt.Tooltip("lost_count:Q", title="Lost"),
+                alt.Tooltip("total_decided:Q", title="Decided"),
+                alt.Tooltip("win_pct:Q", title="Win %", format=".1f"),
+                alt.Tooltip("loss_pct:Q", title="Loss %", format=".1f"),
+            ],
+        )
+        win_rate_line = line_base.mark_line(color="#f59e0b", point=True, strokeWidth=3)
+        win_rate_labels = line_base.mark_text(
+            color="#f8fafc",
+            dy=-12,
+            fontSize=12,
+        ).encode(text=alt.Text("win_pct:Q", format=".0f"))
+        probability_chart = alt.layer(bar_chart, win_rate_line, win_rate_labels).resolve_scale(y="independent")
         st.altair_chart(probability_chart, use_container_width=True)
         st.dataframe(
             probability_frame,
@@ -1026,6 +1054,8 @@ def render_canonical_page() -> None:
                 "won_count": st.column_config.NumberColumn("Won"),
                 "lost_count": st.column_config.NumberColumn("Lost"),
                 "total_decided": st.column_config.NumberColumn("Decided"),
+                "win_pct": st.column_config.NumberColumn("Win %", format="%.1f"),
+                "loss_pct": st.column_config.NumberColumn("Loss %", format="%.1f"),
             },
         )
     else:

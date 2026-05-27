@@ -1078,6 +1078,117 @@ def upsert_fixture_source_links(
     return len(prepared_rows)
 
 
+def upsert_fixture_evaluations(
+    connection: Connection,
+    *,
+    rows: Sequence[dict[str, Any]],
+) -> int:
+    """Insert or update unified fixture evaluation rows."""
+
+    prepared_rows: list[tuple[Any, ...]] = []
+    for row in rows:
+        prepared_rows.append(
+            (
+                row.get("canonical_fixture_id"),
+                row["sport"],
+                row["event_date"],
+                row["normalized_home_team"],
+                row["normalized_away_team"],
+                row.get("display_home_team"),
+                row.get("display_away_team"),
+                row.get("display_league"),
+                row.get("prediction_source"),
+                row.get("prediction_row_id"),
+                row.get("prediction_match_url"),
+                row.get("pred_outcome"),
+                row.get("pred_probability"),
+                row.get("predicted_home_score"),
+                row.get("predicted_away_score"),
+                row.get("result_source_used"),
+                row.get("result_row_id"),
+                row.get("actual_home_score"),
+                row.get("actual_away_score"),
+                row.get("actual_outcome"),
+                row.get("pred_hit"),
+                row.get("bookmaker_row_count", 0),
+                Jsonb(row.get("bookmaker_sources_json") or []),
+                Jsonb(row.get("available_sources_json") or []),
+                row["evaluation_status"],
+                row.get("evaluation_confidence", 1.0),
+            )
+        )
+
+    if not prepared_rows:
+        return 0
+
+    with connection.cursor() as cursor:
+        cursor.executemany(
+            """
+            INSERT INTO fixture_evaluations (
+                canonical_fixture_id,
+                sport,
+                event_date,
+                normalized_home_team,
+                normalized_away_team,
+                display_home_team,
+                display_away_team,
+                display_league,
+                prediction_source,
+                prediction_row_id,
+                prediction_match_url,
+                pred_outcome,
+                pred_probability,
+                predicted_home_score,
+                predicted_away_score,
+                result_source_used,
+                result_row_id,
+                actual_home_score,
+                actual_away_score,
+                actual_outcome,
+                pred_hit,
+                bookmaker_row_count,
+                bookmaker_sources_json,
+                available_sources_json,
+                evaluation_status,
+                evaluation_confidence
+            )
+            VALUES (
+                %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                %s, %s, %s, %s, %s, %s
+            )
+            ON CONFLICT (sport, event_date, normalized_home_team, normalized_away_team)
+            DO UPDATE SET
+                canonical_fixture_id = COALESCE(EXCLUDED.canonical_fixture_id, fixture_evaluations.canonical_fixture_id),
+                display_home_team = COALESCE(EXCLUDED.display_home_team, fixture_evaluations.display_home_team),
+                display_away_team = COALESCE(EXCLUDED.display_away_team, fixture_evaluations.display_away_team),
+                display_league = COALESCE(EXCLUDED.display_league, fixture_evaluations.display_league),
+                prediction_source = COALESCE(EXCLUDED.prediction_source, fixture_evaluations.prediction_source),
+                prediction_row_id = COALESCE(EXCLUDED.prediction_row_id, fixture_evaluations.prediction_row_id),
+                prediction_match_url = COALESCE(EXCLUDED.prediction_match_url, fixture_evaluations.prediction_match_url),
+                pred_outcome = COALESCE(EXCLUDED.pred_outcome, fixture_evaluations.pred_outcome),
+                pred_probability = COALESCE(EXCLUDED.pred_probability, fixture_evaluations.pred_probability),
+                predicted_home_score = COALESCE(EXCLUDED.predicted_home_score, fixture_evaluations.predicted_home_score),
+                predicted_away_score = COALESCE(EXCLUDED.predicted_away_score, fixture_evaluations.predicted_away_score),
+                result_source_used = COALESCE(EXCLUDED.result_source_used, fixture_evaluations.result_source_used),
+                result_row_id = COALESCE(EXCLUDED.result_row_id, fixture_evaluations.result_row_id),
+                actual_home_score = COALESCE(EXCLUDED.actual_home_score, fixture_evaluations.actual_home_score),
+                actual_away_score = COALESCE(EXCLUDED.actual_away_score, fixture_evaluations.actual_away_score),
+                actual_outcome = COALESCE(EXCLUDED.actual_outcome, fixture_evaluations.actual_outcome),
+                pred_hit = COALESCE(EXCLUDED.pred_hit, fixture_evaluations.pred_hit),
+                bookmaker_row_count = EXCLUDED.bookmaker_row_count,
+                bookmaker_sources_json = EXCLUDED.bookmaker_sources_json,
+                available_sources_json = EXCLUDED.available_sources_json,
+                evaluation_status = EXCLUDED.evaluation_status,
+                evaluation_confidence = EXCLUDED.evaluation_confidence,
+                updated_at = NOW()
+            """,
+            prepared_rows,
+        )
+
+    return len(prepared_rows)
+
+
 # =============================================================================
 # Polymarket Market Repository
 # =============================================================================

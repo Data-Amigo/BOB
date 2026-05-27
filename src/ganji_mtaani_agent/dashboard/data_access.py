@@ -542,6 +542,38 @@ def _canonical_filters(
     return clauses, params
 
 
+def _fixture_evaluation_filters(
+    *,
+    sport: str | None = None,
+    source_name: str | None = None,
+    search_text: str | None = None,
+) -> tuple[list[str], list[Any]]:
+    clauses: list[str] = []
+    params: list[Any] = []
+
+    sport_aliases = _canonical_sport_aliases(sport)
+    if sport_aliases:
+        clauses.append("LOWER(fe.sport) = ANY(%s)")
+        params.append(sport_aliases)
+    if source_name:
+        clauses.append("fe.available_sources_json ? %s")
+        params.append(source_name)
+    if search_text:
+        search_value = f"%{search_text}%"
+        clauses.append(
+            """
+            (
+                COALESCE(fe.display_home_team, '') ILIKE %s
+                OR COALESCE(fe.display_away_team, '') ILIKE %s
+                OR COALESCE(fe.display_league, '') ILIKE %s
+            )
+            """
+        )
+        params.extend([search_value, search_value, search_value])
+
+    return clauses, params
+
+
 @st.cache_data(ttl=300)
 def fetch_canonical_sport_options() -> list[str]:
     rows = _fetch_all("SELECT DISTINCT LOWER(sport) AS sport FROM canonical_fixtures ORDER BY 1")
@@ -567,6 +599,38 @@ def fetch_canonical_summary(
     source_name: str | None = None,
     search_text: str | None = None,
 ) -> dict[str, Any]:
+    if table_exists("fixture_evaluations"):
+        clauses, params = _fixture_evaluation_filters(
+            sport=sport,
+            source_name=source_name,
+            search_text=search_text,
+        )
+        where_sql = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+        rows = _fetch_all(
+            f"""
+            SELECT
+                COUNT(*) AS total_games,
+                COUNT(*) FILTER (WHERE fe.prediction_source IS NOT NULL) AS total_games_predicted,
+                COUNT(*) FILTER (
+                    WHERE fe.prediction_source IS NOT NULL
+                      AND fe.result_source_used IS NOT NULL
+                      AND fe.pred_hit IS NOT NULL
+                ) AS total_results,
+                COUNT(*) FILTER (WHERE fe.pred_hit IS TRUE) AS total_won,
+                COUNT(*) FILTER (WHERE fe.pred_hit IS FALSE) AS total_lost
+            FROM fixture_evaluations AS fe
+            {where_sql}
+            """,
+            params,
+        )
+        summary = rows[0] if rows else {}
+        total_results = int(summary.get("total_results") or 0)
+        total_won = int(summary.get("total_won") or 0)
+        total_lost = int(summary.get("total_lost") or 0)
+        summary["pct_won"] = round((100.0 * total_won / total_results), 2) if total_results else 0
+        summary["pct_lost"] = round((100.0 * total_lost / total_results), 2) if total_results else 0
+        return summary
+
     clauses, params = _canonical_filters(sport=sport, source_name=source_name, search_text=search_text)
     where_sql = f"WHERE {' AND '.join(clauses)}" if clauses else ""
     canonical_rows = _fetch_all(
@@ -649,6 +713,53 @@ def fetch_canonical_probability_breakdown(
     source_name: str | None = None,
     search_text: str | None = None,
 ) -> list[dict[str, Any]]:
+    if table_exists("fixture_evaluations"):
+        clauses, params = _fixture_evaluation_filters(
+            sport=sport,
+            source_name=source_name,
+            search_text=search_text,
+        )
+        clauses.append("fe.pred_probability IS NOT NULL")
+        clauses.append("fe.pred_hit IS NOT NULL")
+        where_sql = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+        return _fetch_all(
+            f"""
+            WITH bucketed AS (
+                SELECT
+                    CASE
+                        WHEN fe.pred_probability < 40 THEN '<40%%'
+                        WHEN fe.pred_probability < 50 THEN '40-50%%'
+                        WHEN fe.pred_probability < 60 THEN '50-60%%'
+                        WHEN fe.pred_probability < 70 THEN '60-70%%'
+                        WHEN fe.pred_probability < 80 THEN '70-80%%'
+                        WHEN fe.pred_probability < 90 THEN '80-90%%'
+                        ELSE '90-100%%'
+                    END AS probability_bucket,
+                    CASE
+                        WHEN fe.pred_probability < 40 THEN 0
+                        WHEN fe.pred_probability < 50 THEN 1
+                        WHEN fe.pred_probability < 60 THEN 2
+                        WHEN fe.pred_probability < 70 THEN 3
+                        WHEN fe.pred_probability < 80 THEN 4
+                        WHEN fe.pred_probability < 90 THEN 5
+                        ELSE 6
+                    END AS bucket_order,
+                    fe.pred_hit
+                FROM fixture_evaluations AS fe
+                {where_sql}
+            )
+            SELECT
+                probability_bucket,
+                COUNT(*) FILTER (WHERE pred_hit IS TRUE) AS won_count,
+                COUNT(*) FILTER (WHERE pred_hit IS FALSE) AS lost_count,
+                COUNT(*) AS total_decided
+            FROM bucketed
+            GROUP BY probability_bucket, bucket_order
+            ORDER BY bucket_order
+            """,
+            params,
+        )
+
     if source_name and source_name not in {"forebet", "forebet_results", "All"}:
         return []
 
