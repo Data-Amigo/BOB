@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+from datetime import date, datetime
 from typing import Any, Iterable
 
 import streamlit as st
 from psycopg.rows import dict_row
 
 from ganji_mtaani_agent.db.postgres import get_postgres_connection
+from ganji_mtaani_agent.etl.canonical_fixtures import _candidate_from_row, normalize_team_name
 
 
 def _fetch_all(query: str, params: Iterable[Any] | None = None) -> list[dict[str, Any]]:
@@ -29,6 +31,29 @@ def _canonical_sport_aliases(sport: str | None) -> list[str] | None:
     if normalized == "basketball":
         return ["basketball"]
     return [normalized]
+
+
+def _normalize_simulation_sport(value: str | None) -> str:
+    normalized = str(value or "").strip().casefold()
+    if normalized in {"football", "soccer"}:
+        return "football"
+    return normalized
+
+
+def _names_compatible(left: str, right: str) -> bool:
+    if not left or not right:
+        return False
+    if left == right:
+        return True
+    if left in right or right in left:
+        return True
+
+    left_tokens = set(left.split())
+    right_tokens = set(right.split())
+    if not left_tokens or not right_tokens:
+        return False
+    overlap = left_tokens & right_tokens
+    return len(overlap) >= min(2, len(left_tokens), len(right_tokens))
 
 
 @st.cache_data(ttl=30)
@@ -946,6 +971,186 @@ def fetch_canonical_fixture_rows(
         """,
         params,
     )
+
+
+@st.cache_data(ttl=120)
+def fetch_fixture_simulation_inputs(
+    *,
+    sport: str | None = None,
+    search_text: str | None = None,
+) -> list[dict[str, Any]]:
+    if not table_exists("fixture_evaluations"):
+        return []
+
+    clauses, params = _fixture_evaluation_filters(
+        sport=sport,
+        source_name=None,
+        search_text=search_text,
+    )
+    clauses.extend(
+        [
+            "fe.prediction_source IS NOT NULL",
+            "fe.result_source_used IS NOT NULL",
+            "fe.pred_hit IS NOT NULL",
+            "fe.pred_probability IS NOT NULL",
+        ]
+    )
+    where_sql = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+    evaluation_rows = _fetch_all(
+        f"""
+        SELECT
+            fe.id AS evaluation_id,
+            fe.canonical_fixture_id,
+            fe.sport,
+            fe.event_date,
+            fe.normalized_home_team,
+            fe.normalized_away_team,
+            fe.display_league,
+            fe.display_home_team,
+            fe.display_away_team,
+            fe.pred_outcome,
+            fe.pred_probability,
+            fe.pred_hit,
+            fe.result_source_used,
+            fe.bookmaker_row_count
+        FROM fixture_evaluations AS fe
+        {where_sql}
+        ORDER BY fe.event_date, fe.id
+        """,
+        params,
+    )
+    if not evaluation_rows:
+        return []
+
+    bookmaker_params: list[Any] = []
+    bookmaker_clauses: list[str] = []
+    sport_aliases = _canonical_sport_aliases(sport)
+    if sport_aliases:
+        bookmaker_clauses.append("LOWER(bo.sport) = ANY(%s)")
+        bookmaker_params.append(sport_aliases)
+    bookmaker_where_sql = f"WHERE {' AND '.join(bookmaker_clauses)}" if bookmaker_clauses else ""
+    bookmaker_rows = _fetch_all(
+        f"""
+        SELECT
+            bo.id,
+            bo.source_name,
+            bo.sport,
+            bo.home_team,
+            bo.away_team,
+            bo.event_datetime_text,
+            bo.home_odds,
+            bo.draw_odds,
+            bo.away_odds,
+            sr.started_at AS source_run_started_at
+        FROM bookmaker_odds AS bo
+        LEFT JOIN source_runs AS sr
+            ON sr.id = bo.run_id
+        {bookmaker_where_sql}
+        ORDER BY bo.id DESC
+        """,
+        bookmaker_params,
+    )
+
+    bookmaker_index: dict[tuple[str, date, str, str], list[dict[str, Any]]] = {}
+    bookmaker_by_sport_date: dict[tuple[str, date], list[dict[str, Any]]] = {}
+    for bookmaker_row in bookmaker_rows:
+        started_at = bookmaker_row.get("source_run_started_at")
+        if isinstance(started_at, datetime):
+            reference_date = started_at.date()
+        else:
+            reference_date = date.today()
+        candidate = _candidate_from_row(
+            {
+                "source_name": bookmaker_row.get("source_name"),
+                "source_row_id": bookmaker_row.get("id"),
+                "sport": bookmaker_row.get("sport"),
+                "home_team": bookmaker_row.get("home_team"),
+                "away_team": bookmaker_row.get("away_team"),
+                "event_datetime_text": bookmaker_row.get("event_datetime_text"),
+            },
+            source_table="bookmaker_odds",
+            reference_date=reference_date,
+        )
+        if candidate is None or candidate.source_event_date is None:
+            continue
+        key = (
+            _normalize_simulation_sport(bookmaker_row.get("sport")),
+            candidate.source_event_date,
+            normalize_team_name(bookmaker_row.get("home_team")),
+            normalize_team_name(bookmaker_row.get("away_team")),
+        )
+        bookmaker_index.setdefault(key, []).append(bookmaker_row)
+        bookmaker_by_sport_date.setdefault((key[0], key[1]), []).append(bookmaker_row)
+
+    simulation_rows: list[dict[str, Any]] = []
+    for evaluation_row in evaluation_rows:
+        key = (
+            _normalize_simulation_sport(evaluation_row.get("sport")),
+            evaluation_row.get("event_date"),
+            str(evaluation_row.get("normalized_home_team") or ""),
+            str(evaluation_row.get("normalized_away_team") or ""),
+        )
+        matched_bookmakers = bookmaker_index.get(key, [])
+        if not matched_bookmakers:
+            same_day_candidates = bookmaker_by_sport_date.get((key[0], key[1]), [])
+            matched_bookmakers = [
+                bookmaker_row
+                for bookmaker_row in same_day_candidates
+                if _names_compatible(key[2], normalize_team_name(bookmaker_row.get("home_team")))
+                and _names_compatible(key[3], normalize_team_name(bookmaker_row.get("away_team")))
+            ]
+        if not matched_bookmakers:
+            simulation_rows.append(
+                {
+                    **evaluation_row,
+                    "bookmaker_source": None,
+                    "predicted_outcome_odds": None,
+                }
+            )
+            continue
+
+        best_by_source: dict[str, float] = {}
+        pred_outcome = str(evaluation_row.get("pred_outcome") or "")
+        for bookmaker_row in matched_bookmakers:
+            if pred_outcome == "1":
+                odds_value = bookmaker_row.get("home_odds")
+            elif pred_outcome == "X":
+                odds_value = bookmaker_row.get("draw_odds")
+            elif pred_outcome == "2":
+                odds_value = bookmaker_row.get("away_odds")
+            else:
+                odds_value = None
+            if odds_value in (None, "", 0):
+                continue
+            source_name = str(bookmaker_row.get("source_name") or "")
+            try:
+                odds_float = float(odds_value)
+            except (TypeError, ValueError):
+                continue
+            current = best_by_source.get(source_name)
+            if current is None or odds_float > current:
+                best_by_source[source_name] = odds_float
+
+        if not best_by_source:
+            simulation_rows.append(
+                {
+                    **evaluation_row,
+                    "bookmaker_source": None,
+                    "predicted_outcome_odds": None,
+                }
+            )
+            continue
+
+        for source_name, odds_float in sorted(best_by_source.items()):
+            simulation_rows.append(
+                {
+                    **evaluation_row,
+                    "bookmaker_source": source_name,
+                    "predicted_outcome_odds": odds_float,
+                }
+            )
+
+    return simulation_rows
 
 
 # =============================================================================

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib
+import math
 import os
 import sys
 from datetime import UTC, date, datetime
@@ -25,6 +26,7 @@ from ganji_mtaani_agent.dashboard.data_access import (
     fetch_canonical_source_options,
     fetch_canonical_sport_options,
     fetch_canonical_summary,
+    fetch_fixture_simulation_inputs,
     fetch_flashscore_results,
     fetch_flashscore_results_sport_options,
     fetch_flashscore_results_status_options,
@@ -64,6 +66,7 @@ from ganji_mtaani_agent.dashboard.data_access import (
 # Constants
 # =============================================================================
 PAGE_TITLE = "BoB | Decision Intelligence"
+PAGE_SIMULATION = "Simulation"
 
 PAGE_OVERVIEW   = "📊  Overview"
 PAGE_BOOKMAKER  = "🎰  Bookmaker Odds"
@@ -322,7 +325,7 @@ def render_sidebar() -> str:
 
     page = st.sidebar.radio(
         "Navigate",
-        options=[PAGE_OVERVIEW, PAGE_BOOKMAKER, PAGE_FOREBET, PAGE_POLYMARKET, PAGE_RESULTS, PAGE_CANONICAL, PAGE_HISTORY, PAGE_INSURANCE],
+        options=[PAGE_OVERVIEW, PAGE_BOOKMAKER, PAGE_FOREBET, PAGE_POLYMARKET, PAGE_RESULTS, PAGE_CANONICAL, PAGE_SIMULATION, PAGE_HISTORY, PAGE_INSURANCE],
         label_visibility="collapsed",
     )
 
@@ -358,6 +361,458 @@ def safe_rows(loader, *args, **kwargs) -> list[Any]:
     except Exception as exc:
         st.error(f"Database read failed: {exc}")
         return []
+
+
+SIMULATION_TIER_BUCKETS = {
+    "Gold": ["80-90%", "90-100%"],
+    "Silver": ["60-70%", "70-80%"],
+    "Bronze": ["<40%", "40-50%", "50-60%"],
+}
+
+
+def _probability_bucket(probability: float | int | None) -> str | None:
+    if probability is None:
+        return None
+    value = float(probability)
+    if value < 40:
+        return "<40%"
+    if value < 50:
+        return "40-50%"
+    if value < 60:
+        return "50-60%"
+    if value < 70:
+        return "60-70%"
+    if value < 80:
+        return "70-80%"
+    if value < 90:
+        return "80-90%"
+    return "90-100%"
+
+
+def _tier_for_bucket(bucket: str | None) -> str:
+    if not bucket:
+        return "Unclassified"
+    for tier_name, tier_buckets in SIMULATION_TIER_BUCKETS.items():
+        if bucket in tier_buckets:
+            return tier_name
+    return "Unclassified"
+
+
+def _prepare_simulation_rows(
+    raw_rows: list[dict[str, Any]],
+    bookmaker_mode: str,
+    *,
+    fallback_odds: float = 1.5,
+) -> list[dict[str, Any]]:
+    grouped: dict[int, dict[str, Any]] = {}
+
+    for raw_row in raw_rows:
+        evaluation_id = int(raw_row["evaluation_id"])
+        row = grouped.get(evaluation_id)
+        if row is None:
+            bucket = _probability_bucket(raw_row.get("pred_probability"))
+            row = {
+                "evaluation_id": evaluation_id,
+                "canonical_fixture_id": raw_row.get("canonical_fixture_id"),
+                "sport": raw_row.get("sport"),
+                "event_date": raw_row.get("event_date"),
+                "display_league": raw_row.get("display_league"),
+                "display_home_team": raw_row.get("display_home_team"),
+                "display_away_team": raw_row.get("display_away_team"),
+                "pred_outcome": raw_row.get("pred_outcome"),
+                "pred_probability": float(raw_row.get("pred_probability") or 0.0),
+                "pred_hit": bool(raw_row.get("pred_hit")),
+                "result_source_used": raw_row.get("result_source_used"),
+                "probability_bucket": bucket,
+                "tier": _tier_for_bucket(bucket),
+                "odds_by_source": {},
+            }
+            grouped[evaluation_id] = row
+
+        bookmaker_source = raw_row.get("bookmaker_source")
+        odds_value = raw_row.get("predicted_outcome_odds")
+        if bookmaker_source and odds_value not in (None, "", 0):
+            odds_float = float(odds_value)
+            current_value = row["odds_by_source"].get(bookmaker_source)
+            if current_value is None or odds_float > current_value:
+                row["odds_by_source"][bookmaker_source] = odds_float
+
+    prepared_rows: list[dict[str, Any]] = []
+    for row in grouped.values():
+        odds_by_source = row.pop("odds_by_source")
+        selected_odds = None
+        selected_bookmaker = None
+
+        if bookmaker_mode == "Best Available":
+            if odds_by_source:
+                selected_bookmaker, selected_odds = max(odds_by_source.items(), key=lambda item: item[1])
+        else:
+            selected_odds = odds_by_source.get(bookmaker_mode.lower())
+            selected_bookmaker = bookmaker_mode.lower() if selected_odds is not None else None
+
+        if selected_odds is None or selected_odds <= 1:
+            selected_odds = float(fallback_odds)
+            selected_bookmaker = "fallback_1.50"
+            row["used_fallback_odds"] = True
+        else:
+            row["used_fallback_odds"] = False
+
+        row["selected_odds"] = float(selected_odds)
+        row["selected_bookmaker"] = selected_bookmaker
+        row["has_linked_bookmaker_odds"] = not bool(row["used_fallback_odds"])
+        row["linked_bookmaker_count"] = len(odds_by_source)
+        prepared_rows.append(row)
+
+    prepared_rows.sort(
+        key=lambda row: (
+            str(row.get("probability_bucket") or ""),
+            str(row.get("event_date") or ""),
+            int(row.get("evaluation_id") or 0),
+        )
+    )
+    return prepared_rows
+
+
+def _simulate_bucket_slips(rows: list[dict[str, Any]], *, slip_size: int, stake_per_slip: float) -> dict[str, Any] | None:
+    if len(rows) < slip_size:
+        return None
+
+    full_slip_game_count = (len(rows) // slip_size) * slip_size
+    if full_slip_game_count <= 0:
+        return None
+
+    usable_rows = rows[:full_slip_game_count]
+    slips = [usable_rows[index : index + slip_size] for index in range(0, full_slip_game_count, slip_size)]
+    if not slips:
+        return None
+
+    expected_wins = 0.0
+    expected_payout = 0.0
+    actual_wins = 0
+    actual_payout = 0.0
+
+    for slip in slips:
+        combined_odds = math.prod(float(game["selected_odds"]) for game in slip)
+        win_probability = math.prod(float(game["pred_probability"]) / 100.0 for game in slip)
+        expected_wins += win_probability
+        expected_payout += stake_per_slip * combined_odds * win_probability
+
+        if all(bool(game["pred_hit"]) for game in slip):
+            actual_wins += 1
+            actual_payout += stake_per_slip * combined_odds
+
+    slips_formed = len(slips)
+    total_staked = slips_formed * stake_per_slip
+    expected_net = expected_payout - total_staked
+    actual_net = actual_payout - total_staked
+
+    return {
+        "games_available": len(rows),
+        "slip_size": slip_size,
+        "slips_formed": slips_formed,
+        "stake_per_slip": stake_per_slip,
+        "total_staked": total_staked,
+        "expected_wins": expected_wins,
+        "expected_payout": expected_payout,
+        "expected_net_pnl": expected_net,
+        "expected_roi_pct": (expected_net / total_staked * 100.0) if total_staked else 0.0,
+        "actual_wins": actual_wins,
+        "actual_payout": actual_payout,
+        "actual_net_pnl": actual_net,
+        "actual_hit_rate_pct": (actual_wins / slips_formed * 100.0) if slips_formed else 0.0,
+        "actual_roi_pct": (actual_net / total_staked * 100.0) if total_staked else 0.0,
+    }
+
+
+def _build_simulation_outputs(
+    raw_rows: list[dict[str, Any]],
+    *,
+    bookmaker_mode: str,
+    slip_sizes: list[int],
+    stake_per_slip: float,
+) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    prepared_rows = _prepare_simulation_rows(raw_rows, bookmaker_mode)
+    if not prepared_rows:
+        return pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
+
+    bucket_rows: list[dict[str, Any]] = []
+    rows_by_bucket: dict[str, list[dict[str, Any]]] = {}
+    for row in prepared_rows:
+        rows_by_bucket.setdefault(str(row["probability_bucket"]), []).append(row)
+
+    bucket_order = ["<40%", "40-50%", "50-60%", "60-70%", "70-80%", "80-90%", "90-100%"]
+    for bucket in bucket_order:
+        bucket_games = rows_by_bucket.get(bucket, [])
+        if not bucket_games:
+            continue
+        for slip_size in slip_sizes:
+            result = _simulate_bucket_slips(bucket_games, slip_size=slip_size, stake_per_slip=stake_per_slip)
+            if result is None:
+                continue
+            result["probability_bucket"] = bucket
+            result["tier"] = _tier_for_bucket(bucket)
+            bucket_rows.append(result)
+
+    bucket_frame = pd.DataFrame(bucket_rows)
+    if bucket_frame.empty:
+        return pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
+
+    games_per_tier = (
+        pd.DataFrame(prepared_rows)[["evaluation_id", "tier"]]
+        .drop_duplicates()
+        .groupby("tier", as_index=False)
+        .agg(games_available=("evaluation_id", "count"))
+    )
+
+    tier_rollup = (
+        bucket_frame.groupby(["tier", "slip_size"], as_index=False)
+        .agg(
+            slips_formed=("slips_formed", "sum"),
+            total_staked=("total_staked", "sum"),
+            expected_wins=("expected_wins", "sum"),
+            expected_payout=("expected_payout", "sum"),
+            expected_net_pnl=("expected_net_pnl", "sum"),
+            actual_wins=("actual_wins", "sum"),
+            actual_payout=("actual_payout", "sum"),
+            actual_net_pnl=("actual_net_pnl", "sum"),
+        )
+    )
+    tier_rollup["expected_roi_pct"] = (
+        tier_rollup["expected_net_pnl"] / tier_rollup["total_staked"].replace(0, pd.NA) * 100.0
+    ).fillna(0.0)
+    tier_rollup["actual_roi_pct"] = (
+        tier_rollup["actual_net_pnl"] / tier_rollup["total_staked"].replace(0, pd.NA) * 100.0
+    ).fillna(0.0)
+    tier_rollup["actual_hit_rate_pct"] = (
+        tier_rollup["actual_wins"] / tier_rollup["slips_formed"].replace(0, pd.NA) * 100.0
+    ).fillna(0.0)
+
+    recommended_rows: list[dict[str, Any]] = []
+    for tier_name, tier_buckets in SIMULATION_TIER_BUCKETS.items():
+        tier_subset = tier_rollup[tier_rollup["tier"] == tier_name]
+        if tier_subset.empty:
+            continue
+        best_row = tier_subset.sort_values(["actual_roi_pct", "actual_net_pnl"], ascending=[False, False]).iloc[0]
+        games_row = games_per_tier[games_per_tier["tier"] == tier_name]
+        games_available = int(games_row["games_available"].iloc[0]) if not games_row.empty else 0
+        recommended_rows.append(
+            {
+                "tier": tier_name,
+                "buckets": ", ".join(tier_buckets),
+                "games_available": games_available,
+                "recommended_slip_size": int(best_row["slip_size"]),
+                "actual_roi_pct": float(best_row["actual_roi_pct"]),
+                "expected_roi_pct": float(best_row["expected_roi_pct"]),
+                "actual_hit_rate_pct": float(best_row["actual_hit_rate_pct"]),
+            }
+        )
+
+    tier_frame = pd.DataFrame(recommended_rows)
+    return pd.DataFrame(prepared_rows), bucket_frame, tier_frame
+
+
+def _resolve_selected_buckets(selected_tier: str, custom_buckets: list[str]) -> list[str]:
+    if selected_tier == "All":
+        return ["<40%", "40-50%", "50-60%", "60-70%", "70-80%", "80-90%", "90-100%"]
+    if selected_tier == "Custom":
+        return custom_buckets
+    return SIMULATION_TIER_BUCKETS.get(selected_tier, [])
+
+
+def _filter_prepared_simulation_rows(
+    rows: list[dict[str, Any]],
+    *,
+    selected_buckets: list[str],
+    date_from: date | None,
+    date_to: date | None,
+) -> list[dict[str, Any]]:
+    filtered_rows: list[dict[str, Any]] = []
+    selected_bucket_set = set(selected_buckets)
+
+    for row in rows:
+        event_date = row.get("event_date")
+        if selected_bucket_set and row.get("probability_bucket") not in selected_bucket_set:
+            continue
+        if date_from and event_date and event_date < date_from:
+            continue
+        if date_to and event_date and event_date > date_to:
+            continue
+        filtered_rows.append(row)
+
+    filtered_rows.sort(
+        key=lambda row: (
+            row.get("event_date") or date.min,
+            str(row.get("probability_bucket") or ""),
+            int(row.get("evaluation_id") or 0),
+        )
+    )
+    return filtered_rows
+
+
+def _build_simulation_slip_ledger(
+    rows: list[dict[str, Any]],
+    *,
+    slip_size: int,
+    stake_per_slip: float,
+) -> tuple[pd.DataFrame, pd.DataFrame, dict[str, Any], pd.DataFrame]:
+    if not rows:
+        return pd.DataFrame(), pd.DataFrame(), {}, pd.DataFrame()
+
+    rows_by_date: dict[date, list[dict[str, Any]]] = {}
+    for row in rows:
+        event_date = row.get("event_date")
+        if isinstance(event_date, date):
+            rows_by_date.setdefault(event_date, []).append(row)
+
+    ledger_rows: list[dict[str, Any]] = []
+    leftover_rows: list[dict[str, Any]] = []
+    bucket_summary_rows: list[dict[str, Any]] = []
+    slip_counter = 1
+
+    total_winning_payout = 0.0
+    total_losing_stake = 0.0
+    total_staked = 0.0
+    won_slips = 0
+    lost_slips = 0
+    total_game_wins = sum(1 for row in rows if bool(row.get("pred_hit")))
+    total_game_losses = sum(1 for row in rows if not bool(row.get("pred_hit")))
+    bookmaker_odds_games = sum(1 for row in rows if bool(row.get("has_linked_bookmaker_odds")))
+    fallback_odds_games = sum(1 for row in rows if bool(row.get("used_fallback_odds")))
+    games_used_in_slips = 0
+    combined_odds_values: list[float] = []
+
+    for event_date in sorted(rows_by_date):
+        date_rows = rows_by_date[event_date]
+
+        bucket_counts: dict[str, dict[str, int]] = {}
+        for game in date_rows:
+            bucket = str(game.get("probability_bucket") or "Unknown")
+            bucket_counts.setdefault(bucket, {"games": 0, "won": 0, "lost": 0})
+            bucket_counts[bucket]["games"] += 1
+            if bool(game.get("has_linked_bookmaker_odds")):
+                bucket_counts[bucket]["bookmaker_odds_games"] = bucket_counts[bucket].get("bookmaker_odds_games", 0) + 1
+            if bool(game.get("used_fallback_odds")):
+                bucket_counts[bucket]["fallback_odds_games"] = bucket_counts[bucket].get("fallback_odds_games", 0) + 1
+            if bool(game.get("pred_hit")):
+                bucket_counts[bucket]["won"] += 1
+            else:
+                bucket_counts[bucket]["lost"] += 1
+
+        for bucket_name, counts in bucket_counts.items():
+            bucket_summary_rows.append(
+                {
+                    "event_date": event_date,
+                    "probability_bucket": bucket_name,
+                    "games": counts["games"],
+                    "won": counts["won"],
+                    "lost": counts["lost"],
+                    "bookmaker_odds_games": counts.get("bookmaker_odds_games", 0),
+                    "fallback_odds_games": counts.get("fallback_odds_games", 0),
+                    "win_pct": (counts["won"] / counts["games"] * 100.0) if counts["games"] else 0.0,
+                }
+            )
+
+        actual_leg_count = min(len(date_rows), slip_size)
+        slip_rows = date_rows[:actual_leg_count]
+        leftover_games = date_rows[actual_leg_count:]
+        games_used_in_slips += len(slip_rows)
+
+        for leftover in leftover_games:
+            leftover_rows.append(
+                {
+                    "event_date": event_date,
+                    "probability_bucket": leftover.get("probability_bucket"),
+                    "home_team": leftover.get("display_home_team"),
+                    "away_team": leftover.get("display_away_team"),
+                    "pred_probability": leftover.get("pred_probability"),
+                    "selected_odds": leftover.get("selected_odds"),
+                    "selected_bookmaker": leftover.get("selected_bookmaker"),
+                    "used_fallback_odds": leftover.get("used_fallback_odds"),
+                }
+            )
+
+        if not slip_rows:
+            continue
+
+        combined_odds = math.prod(float(game["selected_odds"]) for game in slip_rows)
+        combined_odds_values.append(combined_odds)
+        win_probability = math.prod(float(game["pred_probability"]) / 100.0 for game in slip_rows)
+        total_staked += stake_per_slip
+        won = all(bool(game["pred_hit"]) for game in slip_rows)
+        payout = stake_per_slip * combined_odds if won else 0.0
+        net_pnl = payout - stake_per_slip
+
+        if won:
+            won_slips += 1
+            total_winning_payout += payout
+        else:
+            lost_slips += 1
+            total_losing_stake += stake_per_slip
+
+        failed_legs = [
+            f'{game["display_home_team"]} vs {game["display_away_team"]}'
+            for game in slip_rows
+            if not bool(game["pred_hit"])
+        ]
+        leg_summary = " | ".join(
+            f'{game["display_home_team"]} vs {game["display_away_team"]} ({game["selected_odds"]:.2f})'
+            for game in slip_rows
+        )
+        bucket_mix = ", ".join(str(game.get("probability_bucket") or "") for game in slip_rows)
+        odds_sources = " | ".join(
+            f'{game["display_home_team"]} vs {game["display_away_team"]}: {game["selected_bookmaker"]}'
+            for game in slip_rows
+        )
+
+        ledger_rows.append(
+            {
+                "slip_id": f"{event_date.isoformat()}-1",
+                "event_date": event_date,
+                "slip_sequence": slip_counter,
+                "slip_size": len(slip_rows),
+                "target_slip_size": slip_size,
+                "bucket_mix": bucket_mix,
+                "legs": leg_summary,
+                "odds_sources": odds_sources,
+                "combined_odds": combined_odds,
+                "stake": stake_per_slip,
+                "expected_win_probability_pct": win_probability * 100.0,
+                "result": "Won" if won else "Lost",
+                "payout": payout,
+                "net_pnl": net_pnl,
+                "failed_legs": ", ".join(failed_legs) if failed_legs else "",
+            }
+        )
+        slip_counter += 1
+
+    ledger_frame = pd.DataFrame(ledger_rows)
+    leftover_frame = pd.DataFrame(leftover_rows)
+    bucket_summary_frame = pd.DataFrame(bucket_summary_rows)
+
+    summary = {
+        "games_selected": len(rows),
+        "game_wins": total_game_wins,
+        "game_losses": total_game_losses,
+        "game_win_rate_pct": (total_game_wins / len(rows) * 100.0) if rows else 0.0,
+        "bookmaker_odds_games": bookmaker_odds_games,
+        "fallback_odds_games": fallback_odds_games,
+        "games_used_in_slips": games_used_in_slips,
+        "slips_formed": len(ledger_rows),
+        "leftover_games": len(leftover_rows),
+        "amount_earned": total_winning_payout,
+        "amount_lost": total_losing_stake,
+        "net_pnl": total_winning_payout - total_staked,
+        "roi_pct": ((total_winning_payout - total_staked) / total_staked * 100.0) if total_staked else 0.0,
+        "won_slips": won_slips,
+        "lost_slips": lost_slips,
+        "slip_win_rate_pct": (won_slips / len(ledger_rows) * 100.0) if ledger_rows else 0.0,
+        "total_staked": total_staked,
+        "average_combined_odds": (sum(combined_odds_values) / len(combined_odds_values)) if combined_odds_values else 0.0,
+        "break_even_slip_hit_rate_pct": ((1 / (sum(combined_odds_values) / len(combined_odds_values))) * 100.0)
+        if combined_odds_values and (sum(combined_odds_values) / len(combined_odds_values)) > 0
+        else 0.0,
+    }
+    return ledger_frame, leftover_frame, summary, bucket_summary_frame
 
 
 def render_daily_ingestion_controls() -> None:
@@ -1102,6 +1557,286 @@ def render_canonical_page() -> None:
         st.info("No canonical fixtures matched the current filters.")
 
 
+def render_simulation_page() -> None:
+    st.subheader("Canonical Fixture Simulation")
+    st.caption(
+        "Date-driven baseline simulation across evaluated Forebet fixtures using bookmaker odds tied to the canonical key. "
+        "Assumptions: one slip per day, flat daily stake, up-to-N legs per day, and predicted-outcome odds only."
+    )
+
+    if not safe_table_exists("fixture_evaluations"):
+        st.warning("The unified evaluation table is not available yet. Run ingestion so the evaluation rebuild can complete first.")
+        return
+
+    c1, c2, c3, c4 = st.columns([1, 1, 1, 2])
+    selected_sport = c1.selectbox("Sport", options=["All", "Football", "Basketball"], key="simulation_sport")
+    selected_bookmaker = c2.selectbox(
+        "Odds Source",
+        options=["Best Available", "betika", "sportpesa", "mozzart"],
+        key="simulation_bookmaker",
+    )
+    stake_per_slip = float(
+        c3.number_input(
+            "Stake (KES)",
+            min_value=100,
+            max_value=1000,
+            value=1000,
+            step=50,
+            key="simulation_stake",
+        )
+    )
+    search_text = c4.text_input("Search team or league", value="", key="simulation_search")
+
+    f1, f2 = st.columns([1, 3])
+    fallback_odds = float(
+        f1.selectbox(
+            "Fallback Odds",
+            options=[1.2, 1.3, 1.4, 1.5],
+            index=3,
+            key="simulation_fallback_odds",
+            help="Used only when a game has no linked bookmaker odds for the predicted outcome.",
+        )
+    )
+
+    raw_rows = safe_rows(
+        fetch_fixture_simulation_inputs,
+        sport=None if selected_sport == "All" else selected_sport,
+        search_text=search_text or None,
+    )
+    prepared_rows = _prepare_simulation_rows(raw_rows, selected_bookmaker, fallback_odds=fallback_odds)
+    if not prepared_rows:
+        st.info("No evaluated fixtures matched the current simulation filters.")
+        return
+
+    available_dates = sorted(
+        {
+            row["event_date"]
+            for row in prepared_rows
+            if isinstance(row.get("event_date"), date)
+        }
+    )
+    if not available_dates:
+        st.info("The filtered simulation rows do not have usable event dates yet.")
+        return
+
+    d1, d2, d3, d4 = st.columns([1, 1, 1, 1])
+    selected_tier = d1.selectbox("Tier", options=["All", "Gold", "Silver", "Bronze", "Custom"], key="simulation_tier")
+    available_buckets = ["<40%", "40-50%", "50-60%", "60-70%", "70-80%", "80-90%", "90-100%"]
+    default_custom_buckets = SIMULATION_TIER_BUCKETS["Gold"]
+    if selected_tier == "Custom":
+        selected_custom_buckets = d2.multiselect(
+            "Custom Buckets",
+            options=available_buckets,
+            default=default_custom_buckets,
+            key="simulation_custom_buckets",
+        )
+    else:
+        d2.caption(f"Buckets: {', '.join(SIMULATION_TIER_BUCKETS.get(selected_tier, available_buckets))}")
+        selected_custom_buckets = default_custom_buckets
+    default_start = available_dates[0]
+    default_end = available_dates[-1]
+    selected_date_from = d3.date_input("Date From", value=default_start, key="simulation_date_from")
+    selected_date_to = d4.date_input("Date To", value=default_end, key="simulation_date_to")
+
+    s1, s2 = st.columns([1, 3])
+    slip_size = int(s1.selectbox("Slip Size", options=[1, 2, 3, 4], index=3, key="simulation_single_slip_size"))
+    selected_buckets = _resolve_selected_buckets(selected_tier, selected_custom_buckets)
+
+    filtered_rows = _filter_prepared_simulation_rows(
+        prepared_rows,
+        selected_buckets=selected_buckets,
+        date_from=selected_date_from,
+        date_to=selected_date_to,
+    )
+    if not filtered_rows:
+        st.info("No evaluated games matched the selected tier and date filters.")
+        return
+
+    ledger_frame, leftover_frame, summary, bucket_summary_frame = _build_simulation_slip_ledger(
+        filtered_rows,
+        slip_size=slip_size,
+        stake_per_slip=stake_per_slip,
+    )
+
+    games_selected = int(summary.get("games_selected") or 0)
+    bookmaker_odds_games = int(summary.get("bookmaker_odds_games") or 0)
+    fallback_odds_games = int(summary.get("fallback_odds_games") or 0)
+    games_used_in_slips = int(summary.get("games_used_in_slips") or 0)
+    slips_formed = int(summary.get("slips_formed") or 0)
+    leftover_games = int(summary.get("leftover_games") or 0)
+    total_staked = float(summary.get("total_staked") or 0.0)
+    amount_earned = float(summary.get("amount_earned") or 0.0)
+    amount_lost = float(summary.get("amount_lost") or 0.0)
+    net_pnl = float(summary.get("net_pnl") or 0.0)
+    roi_pct = float(summary.get("roi_pct") or 0.0)
+    game_win_rate_pct = float(summary.get("game_win_rate_pct") or 0.0)
+    slip_win_rate_pct = float(summary.get("slip_win_rate_pct") or 0.0)
+    average_combined_odds = float(summary.get("average_combined_odds") or 0.0)
+    break_even_slip_hit_rate_pct = float(summary.get("break_even_slip_hit_rate_pct") or 0.0)
+
+    st.caption(
+        f"Evaluated games in scope: {games_selected}. "
+        f"Linked bookmaker odds found: {bookmaker_odds_games}. "
+        f"Fallback odds used: {fallback_odds_games} at {fallback_odds:.2f}. "
+        f"Games used in daily slips: {games_used_in_slips}. "
+        f"Leftover games: {leftover_games}."
+    )
+
+    m1, m2, m3, m4 = st.columns(4)
+    m1.metric("Total Games", games_selected)
+    m2.metric("Bookmaker Odds Found", bookmaker_odds_games)
+    m3.metric("Fallback Odds Used", fallback_odds_games, delta=f"At {fallback_odds:.2f}")
+    m4.metric("Total Bet Amount", f"KES {total_staked:,.0f}")
+
+    m5, m6, m7, m8 = st.columns(4)
+    m5.metric("Slips Formed", slips_formed)
+    m6.metric("Amount Earned", f"KES {amount_earned:,.0f}")
+    m7.metric("Amount Lost", f"KES {amount_lost:,.0f}")
+    m8.metric("Net P&L", f"KES {net_pnl:,.0f}", delta=f"ROI {roi_pct:.1f}%")
+
+    m9, m10, m11, m12 = st.columns(4)
+    m9.metric("Game Win Rate", f"{game_win_rate_pct:.1f}%")
+    m10.metric("Slip Win Rate", f"{slip_win_rate_pct:.1f}%")
+    m11.metric("Avg Combined Odds", f"{average_combined_odds:.2f}")
+    m12.metric("Break-even Slip Rate", f"{break_even_slip_hit_rate_pct:.1f}%")
+
+    st.markdown("### Bucket Summary For Selected Games")
+    if not bucket_summary_frame.empty:
+        st.dataframe(
+            bucket_summary_frame.sort_values(["event_date", "probability_bucket"]),
+            use_container_width=True,
+            hide_index=True,
+            column_config={
+                "event_date": st.column_config.DateColumn("Game Date"),
+                "probability_bucket": "Probability Bucket",
+                "games": st.column_config.NumberColumn("Games"),
+                "won": st.column_config.NumberColumn("Won"),
+                "lost": st.column_config.NumberColumn("Lost"),
+                "bookmaker_odds_games": st.column_config.NumberColumn("Bookmaker Odds"),
+                "fallback_odds_games": st.column_config.NumberColumn("Fallback Odds"),
+                "win_pct": st.column_config.NumberColumn("Win %", format="%.1f"),
+            },
+        )
+
+        daily_earnings = (
+            ledger_frame.groupby("event_date", as_index=False)
+            .agg(
+                net_pnl=("net_pnl", "sum"),
+                payout=("payout", "sum"),
+                total_stake=("stake", "sum"),
+                slips=("slip_id", "count"),
+                legs_used=("slip_size", "sum"),
+            )
+            .sort_values("event_date")
+        ) if not ledger_frame.empty else pd.DataFrame()
+
+        if not daily_earnings.empty:
+            daily_earnings["cumulative_net_pnl"] = daily_earnings["net_pnl"].cumsum()
+            st.markdown("### Daily Earnings")
+            daily_base = alt.Chart(daily_earnings).encode(
+                x=alt.X("event_date:T", title="Game Date"),
+                tooltip=[
+                    alt.Tooltip("event_date:T", title="Game Date"),
+                    alt.Tooltip("slips:Q", title="Daily Slips"),
+                    alt.Tooltip("total_stake:Q", title="Total Stake", format=",.0f"),
+                    alt.Tooltip("net_pnl:Q", title="Daily Net P&L", format=",.0f"),
+                    alt.Tooltip("payout:Q", title="Payout", format=",.0f"),
+                    alt.Tooltip("legs_used:Q", title="Legs Used"),
+                    alt.Tooltip("cumulative_net_pnl:Q", title="Cumulative Net P&L", format=",.0f"),
+                ],
+            )
+            daily_bars = (
+                daily_base
+                .mark_bar(color="#60A5FA", opacity=0.35)
+                .encode(
+                    y=alt.Y("net_pnl:Q", title="Net P&L (KES)"),
+                )
+            )
+            daily_labels = (
+                daily_base
+                .mark_text(
+                    dy=-12,
+                    color="#E2E8F0",
+                    fontSize=11,
+                    fontWeight="bold",
+                )
+                .encode(
+                    y=alt.Y("net_pnl:Q"),
+                    text=alt.Text("net_pnl:Q", format=",.0f"),
+                )
+            )
+            cumulative_line = (
+                alt.Chart(daily_earnings)
+                .mark_line(point=True, strokeWidth=3, color="#F0B429")
+                .encode(
+                    x=alt.X("event_date:T", title="Game Date"),
+                    y=alt.Y("cumulative_net_pnl:Q", title="Net P&L (KES)"),
+                    tooltip=[
+                        alt.Tooltip("event_date:T", title="Game Date"),
+                        alt.Tooltip("cumulative_net_pnl:Q", title="Cumulative Net P&L", format=",.0f"),
+                    ],
+                )
+            )
+            cumulative_labels = (
+                alt.Chart(daily_earnings)
+                .mark_text(
+                    dy=14,
+                    color="#F0B429",
+                    fontSize=11,
+                    fontWeight="bold",
+                )
+                .encode(
+                    x=alt.X("event_date:T"),
+                    y=alt.Y("cumulative_net_pnl:Q"),
+                    text=alt.Text("cumulative_net_pnl:Q", format=",.0f"),
+                )
+            )
+            earnings_chart = (daily_bars + daily_labels + cumulative_line + cumulative_labels).properties(height=320)
+            st.altair_chart(earnings_chart, use_container_width=True)
+
+    if not ledger_frame.empty:
+        st.markdown("### Slip Ledger")
+        st.dataframe(
+            ledger_frame,
+            use_container_width=True,
+            hide_index=True,
+            column_config={
+                "slip_id": "Slip ID",
+                "event_date": st.column_config.DateColumn("Game Date"),
+                "slip_sequence": st.column_config.NumberColumn("Seq"),
+                "slip_size": st.column_config.NumberColumn("Slip Size"),
+                "bucket_mix": "Bucket Mix",
+                "legs": "Legs",
+                "odds_sources": "Odds Sources",
+                "combined_odds": st.column_config.NumberColumn("Combined Odds", format="%.2f"),
+                "stake": st.column_config.NumberColumn("Stake", format="%.0f"),
+                "expected_win_probability_pct": st.column_config.NumberColumn("Expected Win %", format="%.1f"),
+                "result": "Result",
+                "payout": st.column_config.NumberColumn("Payout", format="%.0f"),
+                "net_pnl": st.column_config.NumberColumn("Net P&L", format="%.0f"),
+                "failed_legs": "Failed Legs",
+            },
+        )
+
+    if not leftover_frame.empty:
+        st.markdown("### Leftover Games")
+        st.dataframe(
+            leftover_frame.sort_values(["event_date", "probability_bucket"]),
+            use_container_width=True,
+            hide_index=True,
+            column_config={
+                "event_date": st.column_config.DateColumn("Game Date"),
+                "probability_bucket": "Probability Bucket",
+                "home_team": "Home",
+                "away_team": "Away",
+                "pred_probability": st.column_config.NumberColumn("Pred %", format="%.1f"),
+                "selected_odds": st.column_config.NumberColumn("Odds", format="%.2f"),
+                "selected_bookmaker": "Bookmaker",
+                "used_fallback_odds": st.column_config.CheckboxColumn("Fallback"),
+            },
+        )
+
+
 # =============================================================================
 # Historical Analysis Page
 # =============================================================================
@@ -1450,6 +2185,7 @@ def main() -> None:
     elif page == PAGE_POLYMARKET: render_polymarket_page()
     elif page == PAGE_RESULTS:    render_results_page()
     elif page == PAGE_CANONICAL:  render_canonical_page()
+    elif page == PAGE_SIMULATION: render_simulation_page()
     elif page == PAGE_HISTORY:    render_historical_page()
     elif page == PAGE_INSURANCE:  render_insurance_page()
     else:
