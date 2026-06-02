@@ -12,6 +12,7 @@ from psycopg import Connection
 from ganji_mtaani_agent.db import postgres as postgres_module
 from ganji_mtaani_agent.db import repositories as repositories_module
 import ganji_mtaani_agent.etl.fixture_evaluations as fixture_evaluations_module
+import ganji_mtaani_agent.etl.fixture_model_features as fixture_model_features_module
 from ganji_mtaani_agent.scrapers import forebet as forebet_scraper_module
 from ganji_mtaani_agent.models.polymarket_fetch import PolymarketFetchConfig
 from ganji_mtaani_agent.parsers.betika import parse_betika_basketball, parse_betika_football
@@ -38,6 +39,7 @@ postgres_module = importlib.reload(postgres_module)
 repositories_module = importlib.reload(repositories_module)
 forebet_scraper_module = importlib.reload(forebet_scraper_module)
 fixture_evaluations_module = importlib.reload(fixture_evaluations_module)
+fixture_model_features_module = importlib.reload(fixture_model_features_module)
 
 get_postgres_connection = postgres_module.get_postgres_connection
 insert_bookmaker_odds = repositories_module.insert_bookmaker_odds
@@ -56,6 +58,8 @@ upsert_sports_results = repositories_module.upsert_sports_results
 build_forebet_collection_urls = forebet_scraper_module.build_forebet_collection_urls
 FixtureEvaluationBuildConfig = fixture_evaluations_module.FixtureEvaluationBuildConfig
 build_fixture_evaluations = fixture_evaluations_module.build_fixture_evaluations
+FixtureModelFeatureBuildConfig = fixture_model_features_module.FixtureModelFeatureBuildConfig
+build_fixture_model_features = fixture_model_features_module.build_fixture_model_features
 
 
 BOOKMAKER_PARSERS: dict[tuple[str, str], Callable[[str], list[object]]] = {
@@ -1032,6 +1036,58 @@ def _run_fixture_evaluation_rebuild_task(
         raise
 
 
+def _run_fixture_model_feature_rebuild_task(
+    connection: Connection,
+    *,
+    batch_id: int,
+) -> dict[str, Any]:
+    """Rebuild the transparent model-feature layer after evaluations complete."""
+
+    started_at = datetime.now(UTC)
+    timer_start = perf_counter()
+    run_id = insert_source_run(
+        connection,
+        batch_id=batch_id,
+        source_name="bob",
+        target_name="fixture_model_features",
+        source_type="transform",
+        status="running",
+        started_at=started_at,
+        metadata_json={"task": "fixture_model_features_rebuild"},
+    )
+
+    try:
+        summary = build_fixture_model_features(FixtureModelFeatureBuildConfig())
+        records_found = int(summary.get("rows_upserted") or 0)
+        _finalize_source_run(
+            connection,
+            run_id,
+            status="success",
+            started_counter=timer_start,
+            records_found=records_found,
+            warnings_count=0,
+            metadata_json=summary,
+        )
+        return {
+            "source_name": "bob",
+            "target_name": "fixture_model_features",
+            "status": "success",
+            "records_found": records_found,
+            "run_id": run_id,
+        }
+    except Exception as exc:
+        _finalize_source_run(
+            connection,
+            run_id,
+            status="failed",
+            started_counter=timer_start,
+            warnings_count=0,
+            error_message=str(exc),
+            metadata_json={"task": "fixture_model_features_rebuild"},
+        )
+        raise
+
+
 def build_daily_task_specs(
     connection: Connection,
     *,
@@ -1120,6 +1176,20 @@ def run_daily_ingestion(config: DailyIngestionConfig) -> dict[str, Any]:
             outcomes.append(
                 {
                     "task_name": "fixture_evaluations_rebuild",
+                    "status": "failed",
+                    "records_found": 0,
+                    "error": str(exc),
+                }
+            )
+
+        try:
+            model_feature_result = _run_fixture_model_feature_rebuild_task(connection, batch_id=batch_id)
+            model_feature_result["task_name"] = "fixture_model_features_rebuild"
+            outcomes.append(model_feature_result)
+        except Exception as exc:
+            outcomes.append(
+                {
+                    "task_name": "fixture_model_features_rebuild",
                     "status": "failed",
                     "records_found": 0,
                     "error": str(exc),

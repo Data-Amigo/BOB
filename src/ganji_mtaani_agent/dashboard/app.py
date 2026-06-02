@@ -27,6 +27,8 @@ from ganji_mtaani_agent.dashboard.data_access import (
     fetch_canonical_sport_options,
     fetch_canonical_summary,
     fetch_fixture_simulation_inputs,
+    fetch_fixture_model_feature_rows,
+    fetch_fixture_model_feature_summary,
     fetch_flashscore_results,
     fetch_flashscore_results_sport_options,
     fetch_flashscore_results_status_options,
@@ -410,7 +412,8 @@ def _prepare_simulation_rows(
         evaluation_id = int(raw_row["evaluation_id"])
         row = grouped.get(evaluation_id)
         if row is None:
-            bucket = _probability_bucket(raw_row.get("pred_probability"))
+            forebet_probability = float(raw_row.get("pred_probability") or 0.0)
+            bucket = _probability_bucket(forebet_probability)
             row = {
                 "evaluation_id": evaluation_id,
                 "canonical_fixture_id": raw_row.get("canonical_fixture_id"),
@@ -420,7 +423,8 @@ def _prepare_simulation_rows(
                 "display_home_team": raw_row.get("display_home_team"),
                 "display_away_team": raw_row.get("display_away_team"),
                 "pred_outcome": raw_row.get("pred_outcome"),
-                "pred_probability": float(raw_row.get("pred_probability") or 0.0),
+                "forebet_probability": forebet_probability,
+                "pred_probability": forebet_probability,
                 "pred_hit": bool(raw_row.get("pred_hit")),
                 "result_source_used": raw_row.get("result_source_used"),
                 "probability_bucket": bucket,
@@ -1568,7 +1572,7 @@ def render_simulation_page() -> None:
         st.warning("The unified evaluation table is not available yet. Run ingestion so the evaluation rebuild can complete first.")
         return
 
-    c1, c2, c3, c4 = st.columns([1, 1, 1, 2])
+    c1, c2, c3, c5 = st.columns([1, 1, 1, 2.1])
     selected_sport = c1.selectbox("Sport", options=["All", "Football", "Basketball"], key="simulation_sport")
     selected_bookmaker = c2.selectbox(
         "Odds Source",
@@ -1585,7 +1589,7 @@ def render_simulation_page() -> None:
             key="simulation_stake",
         )
     )
-    search_text = c4.text_input("Search team or league", value="", key="simulation_search")
+    search_text = c5.text_input("Search team or league", value="", key="simulation_search")
 
     f1, f2 = st.columns([1, 3])
     fallback_odds = float(
@@ -1795,6 +1799,46 @@ def render_simulation_page() -> None:
             st.altair_chart(earnings_chart, use_container_width=True)
 
     if not ledger_frame.empty:
+        legs_profit_frame = (
+            ledger_frame.groupby("slip_size", as_index=False)
+            .agg(
+                net_pnl=("net_pnl", "sum"),
+                payout=("payout", "sum"),
+                total_stake=("stake", "sum"),
+                slip_count=("slip_id", "count"),
+            )
+            .sort_values("slip_size")
+        )
+        if not legs_profit_frame.empty:
+            st.markdown("### Profit by Legs Used")
+            legs_profit_base = alt.Chart(legs_profit_frame).encode(
+                x=alt.X("slip_size:O", title="Number of Legs Used"),
+                y=alt.Y("net_pnl:Q", title="Net P&L (KES)"),
+                tooltip=[
+                    alt.Tooltip("slip_size:O", title="Legs Used"),
+                    alt.Tooltip("slip_count:Q", title="Slips"),
+                    alt.Tooltip("total_stake:Q", title="Total Stake", format=",.0f"),
+                    alt.Tooltip("payout:Q", title="Payout", format=",.0f"),
+                    alt.Tooltip("net_pnl:Q", title="Net P&L", format=",.0f"),
+                ],
+            )
+            legs_profit_bars = (
+                legs_profit_base
+                .mark_bar(cornerRadiusTopLeft=6, cornerRadiusTopRight=6, color="#34D399")
+                .properties(height=280)
+            )
+            legs_profit_labels = (
+                legs_profit_base
+                .mark_text(
+                    dy=-10,
+                    color="#E2E8F0",
+                    fontSize=11,
+                    fontWeight="bold",
+                )
+                .encode(text=alt.Text("net_pnl:Q", format=",.0f"))
+            )
+            st.altair_chart(legs_profit_bars + legs_profit_labels, use_container_width=True)
+
         st.markdown("### Slip Ledger")
         st.dataframe(
             ledger_frame,
@@ -2010,6 +2054,283 @@ def render_historical_page() -> None:
         )
     else:
         st.info("No saved Forebet historical analyses yet. Analyze one match URL to populate this workspace.")
+
+    st.markdown("### Historical Insight Snapshot")
+    if not safe_table_exists("fixture_model_features"):
+        st.info("Historical insight rows are not available yet. Run the latest ETL or build the feature layer first.")
+        return
+
+    mf1, mf2, mf3, mf4 = st.columns([1, 1.3, 1.1, 1.8])
+    selected_model_sport = mf1.selectbox(
+        "Insight sport",
+        options=["All", "football", "basketball"],
+        key="model_feature_sport",
+    )
+    selected_probability_bucket = mf2.selectbox(
+        "Probability bucket",
+        options=["All", "<40%", "40-50%", "50-60%", "60-70%", "70-80%", "80-90%", "90-100%"],
+        key="model_feature_bucket",
+    )
+    selected_outcome_filter = mf3.selectbox(
+        "Game result",
+        options=["All", "Won", "Lost"],
+        key="model_feature_outcome",
+    )
+    model_search = mf4.text_input(
+        "Search teams or league",
+        value="",
+        key="model_feature_search",
+        placeholder="Search by team or competition",
+    )
+
+    try:
+        model_summary = fetch_fixture_model_feature_summary(
+            sport=None if selected_model_sport == "All" else selected_model_sport,
+            search_text=model_search or None,
+            probability_bucket=selected_probability_bucket,
+            outcome_filter=selected_outcome_filter,
+        )
+    except Exception:
+        model_summary = {}
+    if model_summary:
+        mc1, mc2, mc3, mc4 = st.columns(4)
+        mc1.metric("Insight Rows", int(model_summary.get("total_feature_rows") or 0))
+        mc2.metric("Rows With History", int(model_summary.get("rows_with_history") or 0))
+        mc3.metric("Avg History Coverage", f"{float(model_summary.get('avg_history_coverage_pct') or 0.0):.1f}%")
+        mc4.metric("Avg Forebet Probability", f"{float(model_summary.get('avg_forebet_probability') or 0.0):.1f}%")
+
+        mc5, mc6, mc7 = st.columns(3)
+        mc5.metric("Won Rows", int(model_summary.get("won_rows") or 0))
+        mc6.metric("Lost Rows", int(model_summary.get("lost_rows") or 0))
+        mc7.metric("Historical Hit Rate", f"{float(model_summary.get('pred_hit_rate_pct') or 0.0):.1f}%")
+
+        st.markdown("#### Historical Summary Percentages")
+        hs1, hs2, hs3 = st.columns(3)
+        hs1.metric("Home Avg Win %", f"{float(model_summary.get('avg_home_win_pct') or 0.0):.1f}%")
+        hs2.metric("Home Avg Draw %", f"{float(model_summary.get('avg_home_draw_pct') or 0.0):.1f}%")
+        hs3.metric("Home Avg Loss %", f"{float(model_summary.get('avg_home_loss_pct') or 0.0):.1f}%")
+
+        as1, as2, as3 = st.columns(3)
+        as1.metric("Away Avg Win %", f"{float(model_summary.get('avg_away_win_pct') or 0.0):.1f}%")
+        as2.metric("Away Avg Draw %", f"{float(model_summary.get('avg_away_draw_pct') or 0.0):.1f}%")
+        as3.metric("Away Avg Loss %", f"{float(model_summary.get('avg_away_loss_pct') or 0.0):.1f}%")
+
+    model_feature_rows = safe_rows(
+        fetch_fixture_model_feature_rows,
+        sport=None if selected_model_sport == "All" else selected_model_sport,
+        search_text=model_search or None,
+        probability_bucket=selected_probability_bucket,
+        outcome_filter=selected_outcome_filter,
+        limit=250,
+    )
+    if model_feature_rows:
+        history_feature_rows = [
+            row for row in model_feature_rows
+            if float(row.get("history_coverage_pct") or 0.0) > 0.0
+        ]
+
+        if history_feature_rows:
+            st.markdown("#### Historical Performance Signals")
+            history_signal_rows_used = len(history_feature_rows)
+
+            avg_previous_games = (
+                sum(
+                    float(row.get("home_prev_matches") or 0.0) + float(row.get("away_prev_matches") or 0.0)
+                    for row in history_feature_rows
+                )
+                / max(history_signal_rows_used * 2, 1)
+            )
+
+            signal_mc1, signal_mc2 = st.columns(2)
+            signal_mc1.metric("Rows Used In Historical Graphs", history_signal_rows_used)
+            signal_mc2.metric("Avg Previous Games Per Team", f"{avg_previous_games:.1f}")
+
+            avg_pct_chart_df = pd.DataFrame(
+                [
+                    {
+                        "Side": "Home",
+                        "Outcome": "Win %",
+                        "Percentage": sum(float(row.get("home_prev_win_pct") or 0.0) for row in history_feature_rows)
+                        / history_signal_rows_used,
+                    },
+                    {
+                        "Side": "Home",
+                        "Outcome": "Draw %",
+                        "Percentage": sum(float(row.get("home_prev_draw_pct") or 0.0) for row in history_feature_rows)
+                        / history_signal_rows_used,
+                    },
+                    {
+                        "Side": "Home",
+                        "Outcome": "Loss %",
+                        "Percentage": sum(float(row.get("home_prev_loss_pct") or 0.0) for row in history_feature_rows)
+                        / history_signal_rows_used,
+                    },
+                    {
+                        "Side": "Away",
+                        "Outcome": "Win %",
+                        "Percentage": sum(float(row.get("away_prev_win_pct") or 0.0) for row in history_feature_rows)
+                        / history_signal_rows_used,
+                    },
+                    {
+                        "Side": "Away",
+                        "Outcome": "Draw %",
+                        "Percentage": sum(float(row.get("away_prev_draw_pct") or 0.0) for row in history_feature_rows)
+                        / history_signal_rows_used,
+                    },
+                    {
+                        "Side": "Away",
+                        "Outcome": "Loss %",
+                        "Percentage": sum(float(row.get("away_prev_loss_pct") or 0.0) for row in history_feature_rows)
+                        / history_signal_rows_used,
+                    },
+                ]
+            )
+            avg_pct_chart_df["Rows Used"] = history_signal_rows_used
+            avg_pct_chart_df["Percentage Label"] = avg_pct_chart_df["Percentage"].map(lambda value: f"{value:.1f}%")
+
+            avg_pct_bars = (
+                alt.Chart(avg_pct_chart_df)
+                .mark_bar(cornerRadiusTopLeft=4, cornerRadiusTopRight=4)
+                .encode(
+                    x=alt.X("Outcome:N", title="Prior Outcome Signal"),
+                    xOffset=alt.XOffset("Side:N"),
+                    y=alt.Y("Percentage:Q", title="Average Prior Percentage"),
+                    color=alt.Color(
+                        "Side:N",
+                        scale=alt.Scale(domain=["Home", "Away"], range=["#1d4ed8", "#ef4444"]),
+                        legend=alt.Legend(title="Side"),
+                    ),
+                    tooltip=[
+                        alt.Tooltip("Side:N"),
+                        alt.Tooltip("Outcome:N"),
+                        alt.Tooltip("Percentage:Q", format=".1f"),
+                        alt.Tooltip("Rows Used:Q"),
+                    ],
+                )
+                .properties(height=320)
+            )
+            avg_pct_labels = avg_pct_bars.mark_text(
+                dy=-10,
+                color="#e2e8f0",
+                fontSize=12,
+            ).encode(text="Percentage Label:N")
+
+            prior_count_chart_df = pd.DataFrame(
+                [
+                    {
+                        "Side": "Home",
+                        "Outcome": "Wins",
+                        "Total Count": sum(float(row.get("home_prev_wins") or 0.0) for row in history_feature_rows),
+                    },
+                    {
+                        "Side": "Home",
+                        "Outcome": "Draws",
+                        "Total Count": sum(float(row.get("home_prev_draws") or 0.0) for row in history_feature_rows),
+                    },
+                    {
+                        "Side": "Home",
+                        "Outcome": "Losses",
+                        "Total Count": sum(float(row.get("home_prev_losses") or 0.0) for row in history_feature_rows),
+                    },
+                    {
+                        "Side": "Away",
+                        "Outcome": "Wins",
+                        "Total Count": sum(float(row.get("away_prev_wins") or 0.0) for row in history_feature_rows),
+                    },
+                    {
+                        "Side": "Away",
+                        "Outcome": "Draws",
+                        "Total Count": sum(float(row.get("away_prev_draws") or 0.0) for row in history_feature_rows),
+                    },
+                    {
+                        "Side": "Away",
+                        "Outcome": "Losses",
+                        "Total Count": sum(float(row.get("away_prev_losses") or 0.0) for row in history_feature_rows),
+                    },
+                ]
+            )
+            prior_count_chart_df["Rows Used"] = history_signal_rows_used
+            prior_count_chart_df["Count Label"] = prior_count_chart_df["Total Count"].map(lambda value: f"{value:.0f}")
+
+            prior_count_bars = (
+                alt.Chart(prior_count_chart_df)
+                .mark_bar(cornerRadiusTopLeft=4, cornerRadiusTopRight=4)
+                .encode(
+                    x=alt.X("Outcome:N", title="Total Prior Results Across Filtered Games"),
+                    xOffset=alt.XOffset("Side:N"),
+                    y=alt.Y("Total Count:Q", title="Total Prior Match Count"),
+                    color=alt.Color(
+                        "Side:N",
+                        scale=alt.Scale(domain=["Home", "Away"], range=["#1d4ed8", "#ef4444"]),
+                        legend=alt.Legend(title="Side"),
+                    ),
+                    tooltip=[
+                        alt.Tooltip("Side:N"),
+                        alt.Tooltip("Outcome:N"),
+                        alt.Tooltip("Total Count:Q", format=".0f"),
+                        alt.Tooltip("Rows Used:Q"),
+                    ],
+                )
+                .properties(height=320)
+            )
+            prior_count_labels = prior_count_bars.mark_text(
+                dy=-10,
+                color="#e2e8f0",
+                fontSize=12,
+            ).encode(text="Count Label:N")
+
+            graph_col1, graph_col2 = st.columns(2)
+            with graph_col1:
+                st.caption(
+                    "Average prior win/draw/loss percentages for the filtered games, "
+                    "split by home side vs away side. Only rows with usable history are included."
+                )
+                st.altair_chart(avg_pct_bars + avg_pct_labels, use_container_width=True)
+            with graph_col2:
+                st.caption(
+                    "Total prior historical result counts behind the filtered games. "
+                    "This helps us see whether the losing set was backed by weak or strong track records."
+                )
+                st.altair_chart(prior_count_bars + prior_count_labels, use_container_width=True)
+
+        st.dataframe(
+            model_feature_rows,
+            use_container_width=True,
+            hide_index=True,
+            column_config={
+                "event_date": st.column_config.DateColumn("Event Date"),
+                "sport": "Sport",
+                "display_league": "League",
+                "display_home_team": "Home",
+                "display_away_team": "Away",
+                "pred_outcome": "Pred",
+                "pred_probability": st.column_config.NumberColumn("Forebet %", format="%.1f"),
+                "probability_bucket": "Bucket",
+                "result_source_used": "Result Source",
+                "actual_home_score": st.column_config.NumberColumn("Home Score", format="%.0f"),
+                "actual_away_score": st.column_config.NumberColumn("Away Score", format="%.0f"),
+                "actual_outcome": "Actual",
+                "home_prev_matches": st.column_config.NumberColumn("Home Prev Games", format="%.0f"),
+                "home_prev_wins": st.column_config.NumberColumn("Home Wins", format="%.0f"),
+                "home_prev_draws": st.column_config.NumberColumn("Home Draws", format="%.0f"),
+                "home_prev_losses": st.column_config.NumberColumn("Home Losses", format="%.0f"),
+                "home_prev_win_pct": st.column_config.NumberColumn("Home Win %", format="%.1f"),
+                "home_prev_draw_pct": st.column_config.NumberColumn("Home Draw %", format="%.1f"),
+                "home_prev_loss_pct": st.column_config.NumberColumn("Home Loss %", format="%.1f"),
+                "away_prev_matches": st.column_config.NumberColumn("Away Prev Games", format="%.0f"),
+                "away_prev_wins": st.column_config.NumberColumn("Away Wins", format="%.0f"),
+                "away_prev_draws": st.column_config.NumberColumn("Away Draws", format="%.0f"),
+                "away_prev_losses": st.column_config.NumberColumn("Away Losses", format="%.0f"),
+                "away_prev_win_pct": st.column_config.NumberColumn("Away Win %", format="%.1f"),
+                "away_prev_draw_pct": st.column_config.NumberColumn("Away Draw %", format="%.1f"),
+                "away_prev_loss_pct": st.column_config.NumberColumn("Away Loss %", format="%.1f"),
+                "history_coverage_pct": st.column_config.NumberColumn("History %", format="%.1f"),
+                "pred_hit": "Hit",
+                "prediction_match_url": st.column_config.LinkColumn("Match URL"),
+            },
+        )
+    else:
+        st.info("No model feature rows are available for the current filter yet.")
 
 
 # =============================================================================

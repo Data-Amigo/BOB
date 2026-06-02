@@ -1189,6 +1189,185 @@ def upsert_fixture_evaluations(
     return len(prepared_rows)
 
 
+def upsert_fixture_model_features(
+    connection: Connection,
+    *,
+    rows: Sequence[dict[str, Any]],
+) -> int:
+    """Insert or update transparent model feature rows built from history."""
+
+    prepared_rows: list[tuple[Any, ...]] = []
+    for row in rows:
+        prepared_rows.append(
+            (
+                row["evaluation_id"],
+                row.get("canonical_fixture_id"),
+                row["sport"],
+                row["event_date"],
+                row["normalized_home_team"],
+                row["normalized_away_team"],
+                row.get("display_home_team"),
+                row.get("display_away_team"),
+                row.get("display_league"),
+                row.get("prediction_source"),
+                row.get("prediction_match_url"),
+                row.get("pred_outcome"),
+                row.get("pred_probability"),
+                row.get("actual_outcome"),
+                row.get("pred_hit"),
+                row.get("home_overall_matches_used", 0),
+                row.get("away_overall_matches_used", 0),
+                row.get("home_home_matches_used", 0),
+                row.get("away_away_matches_used", 0),
+                row.get("home_overall_points_5", 0.0),
+                row.get("away_overall_points_5", 0.0),
+                row.get("home_home_points_5", 0.0),
+                row.get("away_away_points_5", 0.0),
+                row.get("home_overall_form_5", 0.0),
+                row.get("away_overall_form_5", 0.0),
+                row.get("home_home_form_5", 0.0),
+                row.get("away_away_form_5", 0.0),
+                row.get("overall_form_edge_5", 0.0),
+                row.get("venue_form_edge_5", 0.0),
+                row.get("home_prev_matches", 0),
+                row.get("home_prev_wins", 0),
+                row.get("home_prev_draws", 0),
+                row.get("home_prev_losses", 0),
+                row.get("home_prev_win_pct", 0.0),
+                row.get("home_prev_draw_pct", 0.0),
+                row.get("home_prev_loss_pct", 0.0),
+                row.get("away_prev_matches", 0),
+                row.get("away_prev_wins", 0),
+                row.get("away_prev_draws", 0),
+                row.get("away_prev_losses", 0),
+                row.get("away_prev_win_pct", 0.0),
+                row.get("away_prev_draw_pct", 0.0),
+                row.get("away_prev_loss_pct", 0.0),
+                row.get("predicted_side_form_5"),
+                row.get("opponent_side_form_5"),
+                row.get("model_confidence_v1"),
+                row.get("history_coverage_pct", 0.0),
+            )
+        )
+
+    if not prepared_rows:
+        return 0
+
+    with connection.cursor() as cursor:
+        cursor.executemany(
+            """
+            INSERT INTO fixture_model_features (
+                evaluation_id,
+                canonical_fixture_id,
+                sport,
+                event_date,
+                normalized_home_team,
+                normalized_away_team,
+                display_home_team,
+                display_away_team,
+                display_league,
+                prediction_source,
+                prediction_match_url,
+                pred_outcome,
+                pred_probability,
+                actual_outcome,
+                pred_hit,
+                home_overall_matches_used,
+                away_overall_matches_used,
+                home_home_matches_used,
+                away_away_matches_used,
+                home_overall_points_5,
+                away_overall_points_5,
+                home_home_points_5,
+                away_away_points_5,
+                home_overall_form_5,
+                away_overall_form_5,
+                home_home_form_5,
+                away_away_form_5,
+                overall_form_edge_5,
+                venue_form_edge_5,
+                home_prev_matches,
+                home_prev_wins,
+                home_prev_draws,
+                home_prev_losses,
+                home_prev_win_pct,
+                home_prev_draw_pct,
+                home_prev_loss_pct,
+                away_prev_matches,
+                away_prev_wins,
+                away_prev_draws,
+                away_prev_losses,
+                away_prev_win_pct,
+                away_prev_draw_pct,
+                away_prev_loss_pct,
+                predicted_side_form_5,
+                opponent_side_form_5,
+                model_confidence_v1,
+                history_coverage_pct
+            )
+            VALUES (
+                %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                %s, %s, %s, %s, %s, %s, %s
+            )
+            ON CONFLICT (evaluation_id)
+            DO UPDATE SET
+                canonical_fixture_id = COALESCE(EXCLUDED.canonical_fixture_id, fixture_model_features.canonical_fixture_id),
+                sport = EXCLUDED.sport,
+                event_date = EXCLUDED.event_date,
+                normalized_home_team = EXCLUDED.normalized_home_team,
+                normalized_away_team = EXCLUDED.normalized_away_team,
+                display_home_team = COALESCE(EXCLUDED.display_home_team, fixture_model_features.display_home_team),
+                display_away_team = COALESCE(EXCLUDED.display_away_team, fixture_model_features.display_away_team),
+                display_league = COALESCE(EXCLUDED.display_league, fixture_model_features.display_league),
+                prediction_source = COALESCE(EXCLUDED.prediction_source, fixture_model_features.prediction_source),
+                prediction_match_url = COALESCE(EXCLUDED.prediction_match_url, fixture_model_features.prediction_match_url),
+                pred_outcome = COALESCE(EXCLUDED.pred_outcome, fixture_model_features.pred_outcome),
+                pred_probability = COALESCE(EXCLUDED.pred_probability, fixture_model_features.pred_probability),
+                actual_outcome = COALESCE(EXCLUDED.actual_outcome, fixture_model_features.actual_outcome),
+                pred_hit = COALESCE(EXCLUDED.pred_hit, fixture_model_features.pred_hit),
+                home_overall_matches_used = EXCLUDED.home_overall_matches_used,
+                away_overall_matches_used = EXCLUDED.away_overall_matches_used,
+                home_home_matches_used = EXCLUDED.home_home_matches_used,
+                away_away_matches_used = EXCLUDED.away_away_matches_used,
+                home_overall_points_5 = EXCLUDED.home_overall_points_5,
+                away_overall_points_5 = EXCLUDED.away_overall_points_5,
+                home_home_points_5 = EXCLUDED.home_home_points_5,
+                away_away_points_5 = EXCLUDED.away_away_points_5,
+                home_overall_form_5 = EXCLUDED.home_overall_form_5,
+                away_overall_form_5 = EXCLUDED.away_overall_form_5,
+                home_home_form_5 = EXCLUDED.home_home_form_5,
+                away_away_form_5 = EXCLUDED.away_away_form_5,
+                overall_form_edge_5 = EXCLUDED.overall_form_edge_5,
+                venue_form_edge_5 = EXCLUDED.venue_form_edge_5,
+                home_prev_matches = EXCLUDED.home_prev_matches,
+                home_prev_wins = EXCLUDED.home_prev_wins,
+                home_prev_draws = EXCLUDED.home_prev_draws,
+                home_prev_losses = EXCLUDED.home_prev_losses,
+                home_prev_win_pct = EXCLUDED.home_prev_win_pct,
+                home_prev_draw_pct = EXCLUDED.home_prev_draw_pct,
+                home_prev_loss_pct = EXCLUDED.home_prev_loss_pct,
+                away_prev_matches = EXCLUDED.away_prev_matches,
+                away_prev_wins = EXCLUDED.away_prev_wins,
+                away_prev_draws = EXCLUDED.away_prev_draws,
+                away_prev_losses = EXCLUDED.away_prev_losses,
+                away_prev_win_pct = EXCLUDED.away_prev_win_pct,
+                away_prev_draw_pct = EXCLUDED.away_prev_draw_pct,
+                away_prev_loss_pct = EXCLUDED.away_prev_loss_pct,
+                predicted_side_form_5 = EXCLUDED.predicted_side_form_5,
+                opponent_side_form_5 = EXCLUDED.opponent_side_form_5,
+                model_confidence_v1 = EXCLUDED.model_confidence_v1,
+                history_coverage_pct = EXCLUDED.history_coverage_pct,
+                updated_at = NOW()
+            """,
+            prepared_rows,
+        )
+
+    return len(prepared_rows)
+
+
 # =============================================================================
 # Polymarket Market Repository
 # =============================================================================

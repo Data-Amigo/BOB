@@ -572,27 +572,28 @@ def _fixture_evaluation_filters(
     sport: str | None = None,
     source_name: str | None = None,
     search_text: str | None = None,
+    table_alias: str = "fe",
 ) -> tuple[list[str], list[Any]]:
     clauses: list[str] = []
     params: list[Any] = []
 
     sport_aliases = _canonical_sport_aliases(sport)
     if sport_aliases:
-        clauses.append("LOWER(fe.sport) = ANY(%s)")
+        clauses.append(f"LOWER({table_alias}.sport) = ANY(%s)")
         params.append(sport_aliases)
     if source_name:
-        clauses.append("fe.available_sources_json ? %s")
+        clauses.append(f"{table_alias}.available_sources_json ? %s")
         params.append(source_name)
     if search_text:
         search_value = f"%{search_text}%"
         clauses.append(
             """
             (
-                COALESCE(fe.display_home_team, '') ILIKE %s
-                OR COALESCE(fe.display_away_team, '') ILIKE %s
-                OR COALESCE(fe.display_league, '') ILIKE %s
+                COALESCE({table_alias}.display_home_team, '') ILIKE %s
+                OR COALESCE({table_alias}.display_away_team, '') ILIKE %s
+                OR COALESCE({table_alias}.display_league, '') ILIKE %s
             )
-            """
+            """.format(table_alias=table_alias)
         )
         params.extend([search_value, search_value, search_value])
 
@@ -1012,8 +1013,11 @@ def fetch_fixture_simulation_inputs(
             fe.pred_probability,
             fe.pred_hit,
             fe.result_source_used,
-            fe.bookmaker_row_count
+            fe.bookmaker_row_count,
+            fmf.model_confidence_v1
         FROM fixture_evaluations AS fe
+        LEFT JOIN fixture_model_features AS fmf
+            ON fmf.evaluation_id = fe.id
         {where_sql}
         ORDER BY fe.event_date, fe.id
         """,
@@ -1151,6 +1155,167 @@ def fetch_fixture_simulation_inputs(
             )
 
     return simulation_rows
+
+
+@st.cache_data(ttl=120)
+def fetch_fixture_model_feature_summary(
+    *,
+    sport: str | None = None,
+    search_text: str | None = None,
+    probability_bucket: str | None = None,
+    outcome_filter: str | None = None,
+) -> dict[str, Any]:
+    if not table_exists("fixture_model_features"):
+        return {}
+
+    clauses, params = _fixture_evaluation_filters(
+        sport=sport,
+        source_name=None,
+        search_text=search_text,
+        table_alias="fmf",
+    )
+    if probability_bucket and probability_bucket != "All":
+        clauses.append(
+            """
+            CASE
+                WHEN fmf.pred_probability < 40 THEN '<40%%'
+                WHEN fmf.pred_probability < 50 THEN '40-50%%'
+                WHEN fmf.pred_probability < 60 THEN '50-60%%'
+                WHEN fmf.pred_probability < 70 THEN '60-70%%'
+                WHEN fmf.pred_probability < 80 THEN '70-80%%'
+                WHEN fmf.pred_probability < 90 THEN '80-90%%'
+                ELSE '90-100%%'
+            END = %s
+            """
+        )
+        params.append(probability_bucket)
+    if outcome_filter == "Won":
+        clauses.append("fmf.pred_hit IS TRUE")
+    elif outcome_filter == "Lost":
+        clauses.append("fmf.pred_hit IS FALSE")
+    where_sql = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+    rows = _fetch_all(
+        f"""
+        SELECT
+            COUNT(*) AS total_feature_rows,
+            COUNT(*) FILTER (WHERE history_coverage_pct > 0) AS rows_with_history,
+            ROUND(AVG(history_coverage_pct)::numeric, 2) AS avg_history_coverage_pct,
+            ROUND(AVG(pred_probability)::numeric, 2) AS avg_forebet_probability,
+            COUNT(*) FILTER (WHERE pred_hit IS TRUE) AS won_rows,
+            COUNT(*) FILTER (WHERE pred_hit IS FALSE) AS lost_rows,
+            ROUND(AVG(home_prev_win_pct)::numeric, 2) AS avg_home_win_pct,
+            ROUND(AVG(home_prev_draw_pct)::numeric, 2) AS avg_home_draw_pct,
+            ROUND(AVG(home_prev_loss_pct)::numeric, 2) AS avg_home_loss_pct,
+            ROUND(AVG(away_prev_win_pct)::numeric, 2) AS avg_away_win_pct,
+            ROUND(AVG(away_prev_draw_pct)::numeric, 2) AS avg_away_draw_pct,
+            ROUND(AVG(away_prev_loss_pct)::numeric, 2) AS avg_away_loss_pct
+        FROM fixture_model_features AS fmf
+        {where_sql}
+        """,
+        params,
+    )
+    summary = rows[0] if rows else {}
+    decided = int(summary.get("won_rows") or 0) + int(summary.get("lost_rows") or 0)
+    summary["pred_hit_rate_pct"] = round((int(summary.get("won_rows") or 0) / decided) * 100.0, 2) if decided else 0.0
+    return summary
+
+
+@st.cache_data(ttl=120)
+def fetch_fixture_model_feature_rows(
+    *,
+    sport: str | None = None,
+    search_text: str | None = None,
+    probability_bucket: str | None = None,
+    outcome_filter: str | None = None,
+    limit: int = 250,
+) -> list[dict[str, Any]]:
+    if not table_exists("fixture_model_features"):
+        return []
+
+    clauses, params = _fixture_evaluation_filters(
+        sport=sport,
+        source_name=None,
+        search_text=search_text,
+        table_alias="fmf",
+    )
+    if probability_bucket and probability_bucket != "All":
+        clauses.append(
+            """
+            CASE
+                WHEN fmf.pred_probability < 40 THEN '<40%%'
+                WHEN fmf.pred_probability < 50 THEN '40-50%%'
+                WHEN fmf.pred_probability < 60 THEN '50-60%%'
+                WHEN fmf.pred_probability < 70 THEN '60-70%%'
+                WHEN fmf.pred_probability < 80 THEN '70-80%%'
+                WHEN fmf.pred_probability < 90 THEN '80-90%%'
+                ELSE '90-100%%'
+            END = %s
+            """
+        )
+        params.append(probability_bucket)
+    if outcome_filter == "Won":
+        clauses.append("fe.pred_hit IS TRUE")
+    elif outcome_filter == "Lost":
+        clauses.append("fe.pred_hit IS FALSE")
+    where_sql = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+    params.append(limit)
+    return _fetch_all(
+        f"""
+        SELECT
+            fmf.event_date,
+            fmf.sport,
+            fmf.display_league,
+            fmf.display_home_team,
+            fmf.display_away_team,
+            fmf.pred_outcome,
+            fmf.pred_probability,
+            CASE
+                WHEN fmf.pred_probability < 40 THEN '<40%%'
+                WHEN fmf.pred_probability < 50 THEN '40-50%%'
+                WHEN fmf.pred_probability < 60 THEN '50-60%%'
+                WHEN fmf.pred_probability < 70 THEN '60-70%%'
+                WHEN fmf.pred_probability < 80 THEN '70-80%%'
+                WHEN fmf.pred_probability < 90 THEN '80-90%%'
+                ELSE '90-100%%'
+            END AS probability_bucket,
+            fe.result_source_used,
+            fe.actual_home_score,
+            fe.actual_away_score,
+            fe.actual_outcome,
+            fe.pred_hit,
+            fmf.home_prev_matches,
+            fmf.home_prev_wins,
+            fmf.home_prev_draws,
+            fmf.home_prev_losses,
+            fmf.home_prev_win_pct,
+            fmf.home_prev_draw_pct,
+            fmf.home_prev_loss_pct,
+            fmf.away_prev_matches,
+            fmf.away_prev_wins,
+            fmf.away_prev_draws,
+            fmf.away_prev_losses,
+            fmf.away_prev_win_pct,
+            fmf.away_prev_draw_pct,
+            fmf.away_prev_loss_pct,
+            fmf.home_overall_form_5,
+            fmf.away_overall_form_5,
+            fmf.home_home_form_5,
+            fmf.away_away_form_5,
+            fmf.overall_form_edge_5,
+            fmf.venue_form_edge_5,
+            fmf.predicted_side_form_5,
+            fmf.opponent_side_form_5,
+            fmf.history_coverage_pct,
+            fmf.prediction_match_url
+        FROM fixture_model_features AS fmf
+        LEFT JOIN fixture_evaluations AS fe
+            ON fe.id = fmf.evaluation_id
+        {where_sql}
+        ORDER BY fmf.event_date DESC, fmf.id DESC
+        LIMIT %s
+        """,
+        params,
+    )
 
 
 # =============================================================================
