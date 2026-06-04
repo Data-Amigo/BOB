@@ -1477,6 +1477,419 @@ def upsert_polymarket_markets(
 
 
 # =============================================================================
+# Telegram / Conversational Bot Repository
+# =============================================================================
+def upsert_bot_user(
+    connection: Connection,
+    *,
+    channel: str,
+    channel_user_id: str,
+    chat_id: str | None = None,
+    username: str | None = None,
+    first_name: str | None = None,
+    last_name: str | None = None,
+    pseudo_name: str | None = None,
+    phone_number: str | None = None,
+    status: str = "active",
+    last_seen_at: datetime | None = None,
+) -> int:
+    """Insert or refresh a bot user identity row and return the internal id."""
+
+    with connection.cursor() as cursor:
+        cursor.execute(
+            """
+            INSERT INTO bot_users (
+                channel,
+                channel_user_id,
+                chat_id,
+                username,
+                first_name,
+                last_name,
+                pseudo_name,
+                phone_number,
+                status,
+                last_seen_at
+            )
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            ON CONFLICT (channel, channel_user_id)
+            DO UPDATE SET
+                chat_id = COALESCE(EXCLUDED.chat_id, bot_users.chat_id),
+                username = COALESCE(EXCLUDED.username, bot_users.username),
+                first_name = COALESCE(EXCLUDED.first_name, bot_users.first_name),
+                last_name = COALESCE(EXCLUDED.last_name, bot_users.last_name),
+                pseudo_name = COALESCE(EXCLUDED.pseudo_name, bot_users.pseudo_name),
+                phone_number = COALESCE(EXCLUDED.phone_number, bot_users.phone_number),
+                status = EXCLUDED.status,
+                last_seen_at = COALESCE(EXCLUDED.last_seen_at, bot_users.last_seen_at),
+                updated_at = NOW()
+            RETURNING id
+            """,
+            (
+                channel,
+                channel_user_id,
+                chat_id,
+                username,
+                first_name,
+                last_name,
+                pseudo_name,
+                phone_number,
+                status,
+                last_seen_at,
+            ),
+        )
+        row = cursor.fetchone()
+    return int(row[0])
+
+
+def upsert_bot_user_consents(
+    connection: Connection,
+    *,
+    user_id: int,
+    terms_accepted: bool | None = None,
+    terms_accepted_at: datetime | None = None,
+    data_processing_consent: bool | None = None,
+    data_processing_consent_at: datetime | None = None,
+    marketing_consent: bool | None = None,
+    marketing_consent_at: datetime | None = None,
+) -> None:
+    """Insert or update a user's consent records."""
+
+    with connection.cursor() as cursor:
+        cursor.execute(
+            """
+            INSERT INTO bot_user_consents (
+                user_id,
+                terms_accepted,
+                terms_accepted_at,
+                data_processing_consent,
+                data_processing_consent_at,
+                marketing_consent,
+                marketing_consent_at
+            )
+            VALUES (%s, COALESCE(%s, FALSE), %s, COALESCE(%s, FALSE), %s, COALESCE(%s, FALSE), %s)
+            ON CONFLICT (user_id)
+            DO UPDATE SET
+                terms_accepted = CASE
+                    WHEN %s IS NULL THEN bot_user_consents.terms_accepted
+                    ELSE EXCLUDED.terms_accepted
+                END,
+                terms_accepted_at = CASE
+                    WHEN %s IS NULL THEN bot_user_consents.terms_accepted_at
+                    ELSE COALESCE(EXCLUDED.terms_accepted_at, bot_user_consents.terms_accepted_at)
+                END,
+                data_processing_consent = CASE
+                    WHEN %s IS NULL THEN bot_user_consents.data_processing_consent
+                    ELSE EXCLUDED.data_processing_consent
+                END,
+                data_processing_consent_at = CASE
+                    WHEN %s IS NULL THEN bot_user_consents.data_processing_consent_at
+                    ELSE COALESCE(EXCLUDED.data_processing_consent_at, bot_user_consents.data_processing_consent_at)
+                END,
+                marketing_consent = CASE
+                    WHEN %s IS NULL THEN bot_user_consents.marketing_consent
+                    ELSE EXCLUDED.marketing_consent
+                END,
+                marketing_consent_at = CASE
+                    WHEN %s IS NULL THEN bot_user_consents.marketing_consent_at
+                    ELSE COALESCE(EXCLUDED.marketing_consent_at, bot_user_consents.marketing_consent_at)
+                END,
+                updated_at = NOW()
+            """,
+            (
+                user_id,
+                terms_accepted,
+                terms_accepted_at,
+                data_processing_consent,
+                data_processing_consent_at,
+                marketing_consent,
+                marketing_consent_at,
+                terms_accepted,
+                terms_accepted_at,
+                data_processing_consent,
+                data_processing_consent_at,
+                marketing_consent,
+                marketing_consent_at,
+            ),
+        )
+
+
+def upsert_bot_user_preferences(
+    connection: Connection,
+    *,
+    user_id: int,
+    preferred_name: str | None = None,
+    preferred_sports: Sequence[str] | None = None,
+    betting_frequency: str | None = None,
+    service_mode: str | None = None,
+    preferred_slip_size: int | None = None,
+    risk_profile: str | None = None,
+) -> None:
+    """Insert or update a user's saved onboarding preferences."""
+
+    with connection.cursor() as cursor:
+        cursor.execute(
+            """
+            INSERT INTO bot_user_preferences (
+                user_id,
+                preferred_name,
+                preferred_sports_json,
+                betting_frequency,
+                service_mode,
+                preferred_slip_size,
+                risk_profile
+            )
+            VALUES (%s, %s, %s, %s, %s, %s, %s)
+            ON CONFLICT (user_id)
+            DO UPDATE SET
+                preferred_name = COALESCE(EXCLUDED.preferred_name, bot_user_preferences.preferred_name),
+                preferred_sports_json = CASE
+                    WHEN EXCLUDED.preferred_sports_json = '[]'::jsonb
+                        THEN bot_user_preferences.preferred_sports_json
+                    ELSE EXCLUDED.preferred_sports_json
+                END,
+                betting_frequency = COALESCE(EXCLUDED.betting_frequency, bot_user_preferences.betting_frequency),
+                service_mode = COALESCE(EXCLUDED.service_mode, bot_user_preferences.service_mode),
+                preferred_slip_size = COALESCE(EXCLUDED.preferred_slip_size, bot_user_preferences.preferred_slip_size),
+                risk_profile = COALESCE(EXCLUDED.risk_profile, bot_user_preferences.risk_profile),
+                updated_at = NOW()
+            """,
+            (
+                user_id,
+                preferred_name,
+                Jsonb(list(preferred_sports or [])),
+                betting_frequency,
+                service_mode,
+                preferred_slip_size,
+                risk_profile,
+            ),
+        )
+
+
+def insert_bot_conversation(
+    connection: Connection,
+    *,
+    user_id: int | None,
+    channel: str,
+    chat_id: str | None,
+    message_direction: str,
+    message_text: str | None,
+    intent: str | None = None,
+    metadata_json: dict[str, Any] | None = None,
+) -> int:
+    """Persist one inbound or outbound conversational message."""
+
+    with connection.cursor() as cursor:
+        cursor.execute(
+            """
+            INSERT INTO bot_conversations (
+                user_id,
+                channel,
+                chat_id,
+                message_direction,
+                message_text,
+                intent,
+                metadata_json
+            )
+            VALUES (%s, %s, %s, %s, %s, %s, %s)
+            RETURNING id
+            """,
+            (
+                user_id,
+                channel,
+                chat_id,
+                message_direction,
+                message_text,
+                intent,
+                Jsonb(metadata_json or {}),
+            ),
+        )
+        row = cursor.fetchone()
+    return int(row[0])
+
+
+def fetch_bot_user_profile(
+    connection: Connection,
+    *,
+    channel: str,
+    channel_user_id: str,
+) -> dict[str, Any] | None:
+    """Return one joined user profile row for the requested channel identity."""
+
+    with connection.cursor(row_factory=dict_row) as cursor:
+        cursor.execute(
+            """
+            SELECT
+                bu.id,
+                bu.channel,
+                bu.channel_user_id,
+                bu.chat_id,
+                bu.username,
+                bu.first_name,
+                bu.last_name,
+                bu.pseudo_name,
+                bu.phone_number,
+                bu.status,
+                buc.terms_accepted,
+                buc.data_processing_consent,
+                buc.marketing_consent,
+                bup.preferred_name,
+                bup.preferred_sports_json,
+                bup.betting_frequency,
+                bup.service_mode,
+                bup.preferred_slip_size,
+                bup.risk_profile
+            FROM bot_users AS bu
+            LEFT JOIN bot_user_consents AS buc
+                ON buc.user_id = bu.id
+            LEFT JOIN bot_user_preferences AS bup
+                ON bup.user_id = bu.id
+            WHERE bu.channel = %s
+              AND bu.channel_user_id = %s
+            LIMIT 1
+            """,
+            (channel, channel_user_id),
+        )
+        row = cursor.fetchone()
+    return dict(row) if row else None
+
+
+def insert_bot_slip(
+    connection: Connection,
+    *,
+    user_id: int | None,
+    channel: str,
+    chat_id: str | None,
+    sport: str,
+    slip_size: int,
+    stake_kes: float | None = None,
+    bucket_labels: Sequence[str] | None = None,
+    source_logic: str | None = None,
+    status: str = "pending",
+    event_date: date | None = None,
+    total_combined_odds: float | None = None,
+    predicted_payout_kes: float | None = None,
+    metadata_json: dict[str, Any] | None = None,
+) -> int:
+    """Insert one generated prototype slip and return its id."""
+
+    with connection.cursor() as cursor:
+        cursor.execute(
+            """
+            INSERT INTO bot_slips (
+                user_id,
+                channel,
+                chat_id,
+                sport,
+                slip_size,
+                stake_kes,
+                bucket_labels_json,
+                source_logic,
+                status,
+                event_date,
+                total_combined_odds,
+                predicted_payout_kes,
+                metadata_json
+            )
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            RETURNING id
+            """,
+            (
+                user_id,
+                channel,
+                chat_id,
+                sport,
+                slip_size,
+                stake_kes,
+                Jsonb(list(bucket_labels or [])),
+                source_logic,
+                status,
+                event_date,
+                total_combined_odds,
+                predicted_payout_kes,
+                Jsonb(metadata_json or {}),
+            ),
+        )
+        row = cursor.fetchone()
+    return int(row[0])
+
+
+def insert_bot_slip_legs(
+    connection: Connection,
+    *,
+    slip_id: int,
+    rows: Sequence[dict[str, Any]],
+) -> int:
+    """Insert fixture legs under one bot slip."""
+
+    prepared_rows: list[tuple[Any, ...]] = []
+    for row in rows:
+        prepared_rows.append(
+            (
+                slip_id,
+                row.get("leg_no"),
+                row.get("sport"),
+                _to_date(row.get("event_date")),
+                row.get("event_datetime_text"),
+                row.get("source_name"),
+                row.get("competition"),
+                row.get("home_team"),
+                row.get("away_team"),
+                row.get("match_url"),
+                row.get("pred_outcome"),
+                row.get("pred_probability"),
+                row.get("probability_bucket"),
+                row.get("selected_odds"),
+                row.get("bookmaker_source"),
+                row.get("result_outcome"),
+                row.get("won"),
+                Jsonb(row.get("metadata_json") or {}),
+            )
+        )
+
+    if not prepared_rows:
+        return 0
+
+    with connection.cursor() as cursor:
+        cursor.executemany(
+            """
+            INSERT INTO bot_slip_legs (
+                slip_id,
+                leg_no,
+                sport,
+                event_date,
+                event_datetime_text,
+                source_name,
+                competition,
+                home_team,
+                away_team,
+                match_url,
+                pred_outcome,
+                pred_probability,
+                probability_bucket,
+                selected_odds,
+                bookmaker_source,
+                result_outcome,
+                won,
+                metadata_json
+            )
+            VALUES (
+                %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                %s, %s, %s, %s, %s, %s, %s, %s, %s
+            )
+            ON CONFLICT (slip_id, leg_no)
+            DO UPDATE SET
+                selected_odds = EXCLUDED.selected_odds,
+                bookmaker_source = EXCLUDED.bookmaker_source,
+                result_outcome = EXCLUDED.result_outcome,
+                won = EXCLUDED.won,
+                metadata_json = EXCLUDED.metadata_json
+            """,
+            prepared_rows,
+        )
+    return len(prepared_rows)
+
+
+# =============================================================================
 # Insurance Products Repository
 # =============================================================================
 def upsert_insurance_products(
