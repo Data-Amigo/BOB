@@ -617,12 +617,12 @@ def _format_multi_slip_message(
     for slip_index, slip_rows in enumerate(slips, start=1):
         first_date = slip_rows[0].get("event_date")
         date_str = (
-            f"{first_date.day} {first_date.strftime(‘%b %Y’)}"
+            f"{first_date.day} {first_date.strftime('%b %Y')}"
             if isinstance(first_date, date)
             else "TBD"
         )
         combined_odds = 1.0
-        has_real_odds = False
+        _FALLBACK_ODDS = 1.5
 
         lines.append(f"━━━━━━━━━━━━━━━━━━━━━━")
         lines.append(f"📋 <b>Slip {slip_index}/{len(slips)}</b>  ·  {_he(sport.title())} {slip_size}-leg  ·  📅 {date_str}")
@@ -638,19 +638,25 @@ def _format_multi_slip_message(
             outcome = str(row.get("pred_outcome") or "")
             outcome_label = _OUTCOME_LABELS.get(outcome, outcome)
 
-            lines.append(f"  {num} <b>{_he(row.get(‘home_team’))} vs {_he(row.get(‘away_team’))}</b>")
-            lines.append(f"      ✅ <b>{_he(outcome)}</b> ({_he(outcome_label)})  ·  📊 <b>{probability:.1f}%</b> {tier_emoji}")
             if isinstance(odds_value, float):
+                display_odds = odds_value
                 bookmaker = _he(row.get("bookmaker_source") or "")
-                odds_part = f"<b>{odds_value:.2f}</b>" + (f" via {bookmaker}" if bookmaker else "")
-                lines.append(f"      💰 {odds_part}")
-                combined_odds *= odds_value
-                has_real_odds = True
+                odds_part = f"<b>{display_odds:.2f}</b>" + (f" via {bookmaker}" if bookmaker else "")
+            else:
+                display_odds = _FALLBACK_ODDS
+                odds_part = f"<b>~{display_odds:.2f}</b> <i>(estimated)</i>"
+
+            combined_odds *= display_odds
+
+            lines.append(f"  {num} <b>{_he(row.get('home_team'))} vs {_he(row.get('away_team'))}</b>")
+            lines.append(f"      ✅ <b>{_he(outcome)}</b> ({_he(outcome_label)})  ·  📊 <b>{probability:.1f}%</b> {tier_emoji}")
+            lines.append(f"      💰 {odds_part}")
             lines.append("")
 
-        if has_real_odds:
-            payout = combined_odds * 100
-            lines.append(f"  💎 <b>Combined: {combined_odds:.2f}x</b>  ·  KES 100 → ~KES {payout:.0f}")
+        lines.append(
+            f"  💎 <b>Combined: {combined_odds:.2f}x</b>  ·  "
+            f"KES 500 → ~KES {combined_odds * 500:,.0f}  ·  KES 1,000 → ~KES {combined_odds * 1000:,.0f}"
+        )
         lines.append("")
 
     lines.append("━━━━━━━━━━━━━━━━━━━━━━")
@@ -679,8 +685,8 @@ def _format_slip_message(*, sport: str, slip_rows: list[dict[str, Any]], slip_si
         "",
     ]
 
+    _FALLBACK_ODDS = 1.5
     combined_odds = 1.0
-    has_odds = False
 
     leg_nums = ["1️⃣", "2️⃣", "3️⃣", "4️⃣"]
     for idx, row in enumerate(slip_rows, start=1):
@@ -694,24 +700,26 @@ def _format_slip_message(*, sport: str, slip_rows: list[dict[str, Any]], slip_si
         outcome_label = _OUTCOME_LABELS.get(outcome, outcome)
         league = _he(row.get("league") or "")
 
+        if isinstance(odds_value, float):
+            display_odds = odds_value
+            bookmaker = _he(row.get("bookmaker_source") or "")
+            odds_line = f"   💰 Odds: <b>{display_odds:.2f}</b>" + (f" via {bookmaker}" if bookmaker else "")
+        else:
+            display_odds = _FALLBACK_ODDS
+            odds_line = f"   💰 Odds: <b>~{display_odds:.2f}</b> <i>(estimated)</i>"
+
+        combined_odds *= display_odds
+
         lines.append(f"{num} <b>{_he(row.get('home_team'))} vs {_he(row.get('away_team'))}</b>")
         if league:
             lines.append(f"   🏟 {league}")
         lines.append(f"   ✅ Pick: <b>{_he(outcome)} ({_he(outcome_label)})</b>")
         lines.append(f"   📊 <b>{probability:.1f}%</b>  {tier_emoji} {_he(tier)} ({_he(bucket)})")
-        if isinstance(odds_value, float):
-            bookmaker = _he(row.get("bookmaker_source") or "")
-            lines.append(f"   💰 Odds: <b>{odds_value:.2f}</b>" + (f" via {bookmaker}" if bookmaker else ""))
-            combined_odds *= odds_value
-            has_odds = True
-        else:
-            lines.append("   💰 Odds: <i>pending</i>")
+        lines.append(odds_line)
         lines.append("")
 
-    if has_odds:
-        payout = combined_odds * 100
-        lines.append(f"💎 <b>Combined odds: {combined_odds:.2f}x</b>")
-        lines.append(f"💵 Stake KES 100 → ~KES {payout:.0f}")
+    lines.append(f"💎 <b>Combined odds: {combined_odds:.2f}x</b>")
+    lines.append(f"💵 KES 500 → ~KES {combined_odds * 500:,.0f}  ·  KES 1,000 → ~KES {combined_odds * 1000:,.0f}")
 
     return "\n".join(lines).strip()
 
@@ -813,7 +821,7 @@ async def _send_onboarding_prompt(
             update,
             context,
             "👋 Welcome to BOB!\n\n"
-            "I’m your betting research assistant — I analyze games and build smart slips from high-probability data.\n\n"
+            "I'm your betting research assistant — I analyze games and build smart slips from high-probability data.\n\n"
             "Tap I Agree to accept the Terms of Use and consent to BOB storing your profile and slip history.\n\n"
             "Bet responsibly. Wins are never guaranteed.",
             user_id=user_id,
@@ -845,7 +853,7 @@ async def _send_onboarding_prompt(
         await _reply_logged(
             update,
             context,
-            "Last one — what’s your betting style?\n\n"
+            "Last one — what's your betting style?\n\n"
             "🛡 Cautious — safer picks, 3-leg slips\n"
             "⚖️ Balanced — mix of value and safety, 3-leg slips\n"
             "🔥 Aggressive — higher odds, 4-leg slips",
@@ -949,7 +957,7 @@ async def _process_onboarding_text(
                 "and summarize performance. Mention that the current prototype focuses on Bronze 70-80, Silver 80-90, and Gold 90-100 pools."
             ),
             fallback_text=(
-                "You’re all set. You can now ask me natural questions like 'what games do we have today?' or 'give me 3 football slips'. "
+                "You're all set. You can now ask me natural questions like 'what games do we have today?' or 'give me 3 football slips'. "
                 "I currently focus on Bronze (70-80%), Silver (80-90%), and Gold (90-100%) pools."
             ),
         )
@@ -989,7 +997,7 @@ async def _reply_with_games_today(
         if not rows:
             continue
         sport_emoji = _SPORT_EMOJIS.get(sport, "🎯")
-        lines.append(f"{sport_emoji} <b>{_he(sport.title())} — Today’s Top Picks</b>")
+        lines.append(f"{sport_emoji} <b>{_he(sport.title())} — Today's Top Picks</b>")
         lines.append("")
         leg_nums = ["1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣", "6️⃣"]
         for idx, row in enumerate(rows, start=1):
@@ -1001,7 +1009,7 @@ async def _reply_with_games_today(
             outcome = str(row.get("pred_outcome") or "")
             outcome_label = _OUTCOME_LABELS.get(outcome, outcome)
             lines.append(
-                f"  {num} <b>{_he(row.get(‘home_team’))} vs {_he(row.get(‘away_team’))}</b>\n"
+                f"  {num} <b>{_he(row.get('home_team'))} vs {_he(row.get('away_team'))}</b>\n"
                 f"      ✅ {_he(outcome_label)}  ·  📊 <b>{probability:.1f}%</b> {tier_emoji} {_he(tier)}"
             )
         lines.append("")
@@ -1073,7 +1081,7 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
     context.user_data["bot_user_id"] = user_id
     intro_text = (
         "⚽🔥 Bonga na BOB — Cheza Smart, Si Kubahatisha.\n\n"
-        "I’m BOB, your betting research assistant.\n\n"
+        "I'm BOB, your betting research assistant.\n\n"
         "I analyze games and build high-probability 3-leg and 4-leg slips from Bronze (70-80%), "
         "Silver (80-90%), and Gold (90-100%+) pools.\n\n"
         "Tap ✅ I Agree to accept the Terms of Use and consent to BOB storing your profile and slip history.\n\n"
@@ -1454,7 +1462,7 @@ async def fallback_text_handler(update: Update, context: ContextTypes.DEFAULT_TY
         await _reply_logged(
             update,
             context,
-            "I’m almost ready for performance follow-up too. For now I can already help with today’s games and generate multiple football or basketball slips from the Bronze, Silver, and Gold pools.",
+            "I'm almost ready for performance follow-up too. For now I can already help with today's games and generate multiple football or basketball slips from the Bronze, Silver, and Gold pools.",
             user_id=user_id,
             intent="performance_stub",
         )
