@@ -1011,7 +1011,7 @@ async def _reply_with_games_today(
 
     # Decide which dates to display
     if target_date is not None:
-        dates_to_show = [(target_date, target_date.strftime("%A %-d %b") if hasattr(date, "strftime") else str(target_date))]
+        dates_to_show = [(target_date, f"{target_date.strftime('%A')} {target_date.day} {target_date.strftime('%b')}")]
     else:
         dates_to_show = [(today, "Today"), (tomorrow, "Tomorrow")]
 
@@ -1045,7 +1045,7 @@ async def _reply_with_games_today(
             if not rows:
                 continue
             date_str = (
-                show_date.strftime("%A, %d %b")
+                f"{show_date.strftime('%A')} {show_date.day} {show_date.strftime('%b')}"
                 if show_date not in (today, tomorrow)
                 else label
             )
