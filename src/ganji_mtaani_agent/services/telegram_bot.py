@@ -252,6 +252,8 @@ def _detect_slip_count_from_text(text: str, default_value: int = 3) -> int:
 
 def _message_intent(text: str) -> str:
     lowered = text.lower().strip()
+    if "tomorrow" in lowered:
+        return "games_tomorrow"
     if any(token in lowered for token in ("today", "games", "fixtures")):
         return "games_today"
     if "performance" in lowered or "yesterday" in lowered or "result" in lowered:
@@ -1001,22 +1003,33 @@ async def _reply_with_games_today(
     *,
     user_id: int,
     profile: dict[str, Any],
+    target_date: date | None = None,
 ) -> None:
     preferred_sports = list(profile.get("preferred_sports_json") or ["football"])
     today = date.today()
     tomorrow = today + timedelta(days=1)
+
+    # Decide which dates to display
+    if target_date is not None:
+        dates_to_show = [(target_date, target_date.strftime("%A %-d %b") if hasattr(date, "strftime") else str(target_date))]
+    else:
+        dates_to_show = [(today, "Today"), (tomorrow, "Tomorrow")]
 
     games_by_sport: dict[str, list[dict[str, Any]]] = {}
     for sport in preferred_sports:
         candidates = _fetch_upcoming_forebet_candidates(sport=sport, min_probability=60.0)
         games_by_sport[sport] = candidates
 
-    total_games = sum(len(rows) for rows in games_by_sport.values())
-    if total_games == 0:
+    total_visible = sum(
+        len([r for r in rows if r.get("event_date") in {d for d, _ in dates_to_show}])
+        for rows in games_by_sport.values()
+    )
+    if total_visible == 0:
+        label = "tomorrow" if target_date == tomorrow else "today"
         await _reply_logged(
             update,
             context,
-            "No upcoming games found right now. Try again after the next data refresh.",
+            f"No upcoming games found for {label}. Try again after the next data refresh.",
             user_id=user_id,
             intent="games_today_empty",
         )
@@ -1026,16 +1039,17 @@ async def _reply_with_games_today(
     leg_nums = ["1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣", "6️⃣"]
 
     for sport, all_rows in games_by_sport.items():
-        if not all_rows:
-            continue
         sport_emoji = _SPORT_EMOJIS.get(sport, "🎯")
-        today_rows = [r for r in all_rows if r.get("event_date") == today][:6]
-        tomorrow_rows = [r for r in all_rows if r.get("event_date") == tomorrow][:6]
-
-        for label, rows in [("Today", today_rows), ("Tomorrow", tomorrow_rows)]:
+        for show_date, label in dates_to_show:
+            rows = [r for r in all_rows if r.get("event_date") == show_date][:6]
             if not rows:
                 continue
-            lines.append(f"{sport_emoji} <b>{_he(sport.title())} — {label}'s Picks</b>")
+            date_str = (
+                show_date.strftime("%A, %d %b")
+                if show_date not in (today, tomorrow)
+                else label
+            )
+            lines.append(f"{sport_emoji} <b>{_he(sport.title())} — {_he(date_str)}'s Picks</b>")
             lines.append("")
             for idx, row in enumerate(rows, start=1):
                 num = leg_nums[idx - 1] if idx <= len(leg_nums) else f"{idx}."
@@ -1072,7 +1086,7 @@ async def _reply_with_slips(
     default_slip_size = int(profile.get("preferred_slip_size") or 3)
     slip_size = _detect_slip_size_from_text(request_text, default_value=default_slip_size)
     slip_count = _detect_slip_count_from_text(request_text, default_value=3)
-    slips = _generate_slips(sport=sport, slip_size=slip_size, slip_count=slip_count, min_probability=60.0)
+    slips = _generate_slips(sport=sport, slip_size=slip_size, slip_count=slip_count, min_probability=70.0)
     _store_generated_slips(user_id=user_id, update=update, sport=sport, slip_size=slip_size, slips=slips)
     message = _format_multi_slip_message(
         sport=sport,
@@ -1183,7 +1197,7 @@ async def _deliver_slip(update: Update, context: ContextTypes.DEFAULT_TYPE, *, s
     if requested_sport not in {"football", "basketball"}:
         requested_sport = preferred_sports[0] if preferred_sports else "football"
 
-    slip_rows = _choose_slip_rows(sport=requested_sport, slip_size=slip_size, min_probability=60.0)
+    slip_rows = _choose_slip_rows(sport=requested_sport, slip_size=slip_size, min_probability=70.0)
     _store_bot_slip(user_id=user_id, update=update, sport=requested_sport, slip_size=slip_size, slip_rows=slip_rows)
     message = _format_slip_message(sport=requested_sport, slip_rows=slip_rows, slip_size=slip_size)
     await _reply_logged(update, context, message, user_id=user_id, intent=f"slip_{slip_size}_response", parse_mode="HTML")
@@ -1461,8 +1475,9 @@ async def fallback_text_handler(update: Update, context: ContextTypes.DEFAULT_TY
 
     if stage != "ready":
         # Let BoB still be useful before full onboarding is complete.
-        if intent == "games_today":
-            await _reply_with_games_today(update, context, user_id=user_id, profile=profile or {})
+        if intent in ("games_today", "games_tomorrow"):
+            td = date.today() + timedelta(days=1) if intent == "games_tomorrow" else None
+            await _reply_with_games_today(update, context, user_id=user_id, profile=profile or {}, target_date=td)
             await _reply_logged(
                 update,
                 context,
@@ -1494,6 +1509,12 @@ async def fallback_text_handler(update: Update, context: ContextTypes.DEFAULT_TY
 
     if intent == "games_today":
         await _reply_with_games_today(update, context, user_id=user_id, profile=profile)
+        return
+    if intent == "games_tomorrow":
+        await _reply_with_games_today(
+            update, context, user_id=user_id, profile=profile,
+            target_date=date.today() + timedelta(days=1),
+        )
         return
     if intent == "generate_slips":
         await _reply_with_slips(update, context, user_id=user_id, profile=profile, request_text=incoming_text)
