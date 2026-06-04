@@ -5,7 +5,7 @@ import logging
 import os
 import re
 from dataclasses import dataclass
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -140,6 +140,14 @@ def _parse_forebet_event_date(value: str | None) -> date | None:
             return datetime.strptime(text, "%d/%m/%Y").date()
         except ValueError:
             return None
+
+
+def _parse_forebet_event_time(value: str | None) -> str | None:
+    """Extract the HH:MM time string from a forebet event_datetime_text."""
+    if not value:
+        return None
+    match = re.search(r"\b(\d{1,2}:\d{2})\b", str(value).strip())
+    return match.group(1) if match else None
 
 
 def _get_openai_client() -> tuple[OpenAI | None, str]:
@@ -373,12 +381,13 @@ def _build_simple_keyboard(options: list[str]) -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup([[option] for option in options], resize_keyboard=True, one_time_keyboard=True)
 
 
-def _fetch_upcoming_forebet_candidates(*, sport: str, min_probability: float, limit: int = 120) -> list[dict[str, Any]]:
-    sport_values = [sport]
-    if sport == "football":
-        sport_values = ["football", "soccer"]
+def _fetch_upcoming_forebet_candidates(*, sport: str, min_probability: float, limit: int = 500) -> list[dict[str, Any]]:
+    sport_values = ["football", "soccer"] if sport == "football" else [sport]
 
     with get_postgres_connection() as connection, connection.cursor(row_factory=dict_row) as cursor:
+        # Filter by date and probability in SQL so the LIMIT applies after filtering,
+        # not before. The old approach (ORDER BY created_at LIMIT 120) missed football
+        # games scraped earlier in the same run.
         cursor.execute(
             """
             SELECT
@@ -391,7 +400,6 @@ def _fetch_upcoming_forebet_candidates(*, sport: str, min_probability: float, li
                 match_url,
                 event_datetime_text,
                 pred_outcome,
-                COALESCE(prob_1, prob_2, prob_x) AS raw_probability,
                 CASE
                     WHEN pred_outcome = '1' THEN prob_1
                     WHEN pred_outcome = '2' THEN prob_2
@@ -403,31 +411,44 @@ def _fetch_upcoming_forebet_candidates(*, sport: str, min_probability: float, li
             FROM forebet_predictions
             WHERE LOWER(sport) = ANY(%s)
               AND match_url IS NOT NULL
-            ORDER BY created_at DESC, id DESC
+              AND pred_outcome IS NOT NULL
+              AND event_datetime_text ~ E'^\\\\d{2}/\\\\d{2}/\\\\d{4}'
+              AND TO_DATE(SUBSTRING(event_datetime_text, 1, 10), 'DD/MM/YYYY')
+                  BETWEEN CURRENT_DATE AND CURRENT_DATE + INTERVAL '7 days'
+              AND CASE
+                    WHEN pred_outcome = '1' THEN prob_1
+                    WHEN pred_outcome = '2' THEN prob_2
+                    WHEN pred_outcome = 'X' THEN prob_x
+                    ELSE NULL
+                  END >= %s
+            ORDER BY
+                TO_DATE(SUBSTRING(event_datetime_text, 1, 10), 'DD/MM/YYYY') ASC,
+                CASE
+                    WHEN pred_outcome = '1' THEN prob_1
+                    WHEN pred_outcome = '2' THEN prob_2
+                    WHEN pred_outcome = 'X' THEN prob_x
+                    ELSE NULL
+                END DESC NULLS LAST
             LIMIT %s
             """,
-            (sport_values, limit),
+            (sport_values, min_probability, limit),
         )
         rows = [dict(row) for row in cursor.fetchall()]
 
-    today = date.today()
+    # Deduplicate by match_url (same match from multiple scrape runs)
     deduped: dict[str, dict[str, Any]] = {}
     for row in rows:
-        pred_probability = _safe_probability(row.get("pred_probability"))
-        if pred_probability is None or pred_probability < min_probability:
-            continue
         event_date = _parse_forebet_event_date(row.get("event_datetime_text"))
-        if event_date is None or event_date < today:
+        if event_date is None:
             continue
         row["event_date"] = event_date
-        row["pred_probability"] = pred_probability
-        row["probability_bucket"] = _bucket_label(pred_probability)
+        row["event_time"] = _parse_forebet_event_time(row.get("event_datetime_text"))
+        row["probability_bucket"] = _bucket_label(float(row.get("pred_probability") or 0.0))
         dedupe_key = str(row.get("match_url") or f"{row.get('home_team')}::{row.get('away_team')}::{event_date.isoformat()}")
         if dedupe_key not in deduped:
             deduped[dedupe_key] = row
 
-    # Second pass: deduplicate same match stored under different sport labels (football vs soccer).
-    # Keep the row with the higher predicted probability.
+    # Second pass: deduplicate same match stored under both 'football' and 'soccer' labels
     name_deduped: dict[str, dict[str, Any]] = {}
     for row in deduped.values():
         name_key = (
@@ -440,7 +461,11 @@ def _fetch_upcoming_forebet_candidates(*, sport: str, min_probability: float, li
             name_deduped[name_key] = row
 
     candidates = list(name_deduped.values())
-    candidates.sort(key=lambda item: (item["event_date"], -(item.get("pred_probability") or 0.0), item.get("home_team") or ""))
+    candidates.sort(key=lambda item: (
+        item["event_date"],
+        item.get("event_time") or "99:99",
+        -(item.get("pred_probability") or 0.0),
+    ))
     return candidates
 
 
@@ -458,7 +483,7 @@ def _fetch_best_bookmaker_odds_by_key(*, sport: str, event_date: date) -> list[d
                 bo.home_odds,
                 bo.draw_odds,
                 bo.away_odds,
-                sr.started_at AS source_run_started_at
+                COALESCE(sr.started_at, bo.created_at) AS source_run_started_at
             FROM bookmaker_odds AS bo
             LEFT JOIN source_runs AS sr
                 ON sr.id = bo.run_id
@@ -679,9 +704,11 @@ def _format_slip_message(*, sport: str, slip_rows: list[dict[str, Any]], slip_si
         else "TBD"
     )
 
+    first_time = slip_rows[0].get("event_time") or ""
+    time_part = f"  ·  🕐 KO from {first_time}" if first_time else ""
     lines = [
         f"{sport_emoji} <b>BOB {slip_size}-Leg {_he(sport.title())} Slip</b>",
-        f"📅 <b>Date:</b> {date_str}",
+        f"📅 <b>Date:</b> {date_str}{time_part}",
         "",
     ]
 
@@ -976,46 +1003,59 @@ async def _reply_with_games_today(
     profile: dict[str, Any],
 ) -> None:
     preferred_sports = list(profile.get("preferred_sports_json") or ["football"])
+    today = date.today()
+    tomorrow = today + timedelta(days=1)
+
     games_by_sport: dict[str, list[dict[str, Any]]] = {}
     for sport in preferred_sports:
-        candidates = _fetch_upcoming_forebet_candidates(sport=sport, min_probability=70.0, limit=40)
-        games_by_sport[sport] = candidates[:6]
+        candidates = _fetch_upcoming_forebet_candidates(sport=sport, min_probability=60.0)
+        games_by_sport[sport] = candidates
 
     total_games = sum(len(rows) for rows in games_by_sport.values())
     if total_games == 0:
         await _reply_logged(
             update,
             context,
-            "I couldn't find high-probability games right now from the Bronze, Silver, and Gold pools. Try again after the next ingestion.",
+            "No upcoming games found right now. Try again after the next data refresh.",
             user_id=user_id,
             intent="games_today_empty",
         )
         return
 
     lines: list[str] = []
-    for sport, rows in games_by_sport.items():
-        if not rows:
+    leg_nums = ["1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣", "6️⃣"]
+
+    for sport, all_rows in games_by_sport.items():
+        if not all_rows:
             continue
         sport_emoji = _SPORT_EMOJIS.get(sport, "🎯")
-        lines.append(f"{sport_emoji} <b>{_he(sport.title())} — Today's Top Picks</b>")
-        lines.append("")
-        leg_nums = ["1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣", "6️⃣"]
-        for idx, row in enumerate(rows, start=1):
-            num = leg_nums[idx - 1] if idx <= len(leg_nums) else f"{idx}."
-            probability = float(row.get("pred_probability") or 0.0)
-            bucket = str(row.get("probability_bucket") or "")
-            tier = _tier_label_from_bucket(bucket) or ""
-            tier_emoji = _TIER_EMOJIS.get(tier, "")
-            outcome = str(row.get("pred_outcome") or "")
-            outcome_label = _OUTCOME_LABELS.get(outcome, outcome)
-            lines.append(
-                f"  {num} <b>{_he(row.get('home_team'))} vs {_he(row.get('away_team'))}</b>\n"
-                f"      ✅ {_he(outcome_label)}  ·  📊 <b>{probability:.1f}%</b> {tier_emoji} {_he(tier)}"
-            )
-        lines.append("")
+        today_rows = [r for r in all_rows if r.get("event_date") == today][:6]
+        tomorrow_rows = [r for r in all_rows if r.get("event_date") == tomorrow][:6]
+
+        for label, rows in [("Today", today_rows), ("Tomorrow", tomorrow_rows)]:
+            if not rows:
+                continue
+            lines.append(f"{sport_emoji} <b>{_he(sport.title())} — {label}'s Picks</b>")
+            lines.append("")
+            for idx, row in enumerate(rows, start=1):
+                num = leg_nums[idx - 1] if idx <= len(leg_nums) else f"{idx}."
+                probability = float(row.get("pred_probability") or 0.0)
+                bucket = str(row.get("probability_bucket") or "")
+                tier = _tier_label_from_bucket(bucket) or ""
+                tier_emoji = _TIER_EMOJIS.get(tier, "")
+                outcome = str(row.get("pred_outcome") or "")
+                outcome_label = _OUTCOME_LABELS.get(outcome, outcome)
+                time_str = row.get("event_time") or ""
+                time_part = f"  🕐 {time_str}" if time_str else ""
+                lines.append(
+                    f"  {num} <b>{_he(row.get('home_team'))} vs {_he(row.get('away_team'))}</b>{time_part}\n"
+                    f"      ✅ {_he(outcome_label)}  ·  📊 <b>{probability:.1f}%</b>"
+                    + (f" {tier_emoji} {_he(tier)}" if tier else "")
+                )
+            lines.append("")
 
     lines.append("━━━━━━━━━━━━━━━━━━━━━━")
-    lines.append(f"💬 Ask: <i>give me 3 football slips · give me 4-leg slip</i>")
+    lines.append("💬 Ask: <i>give me 3 football slips · give me 4-leg slip · tomorrow's games</i>")
     await _reply_logged(update, context, "\n".join(lines).strip(), user_id=user_id, intent="games_today", parse_mode="HTML")
 
 
@@ -1032,7 +1072,7 @@ async def _reply_with_slips(
     default_slip_size = int(profile.get("preferred_slip_size") or 3)
     slip_size = _detect_slip_size_from_text(request_text, default_value=default_slip_size)
     slip_count = _detect_slip_count_from_text(request_text, default_value=3)
-    slips = _generate_slips(sport=sport, slip_size=slip_size, slip_count=slip_count, min_probability=70.0)
+    slips = _generate_slips(sport=sport, slip_size=slip_size, slip_count=slip_count, min_probability=60.0)
     _store_generated_slips(user_id=user_id, update=update, sport=sport, slip_size=slip_size, slips=slips)
     message = _format_multi_slip_message(
         sport=sport,
@@ -1143,7 +1183,7 @@ async def _deliver_slip(update: Update, context: ContextTypes.DEFAULT_TYPE, *, s
     if requested_sport not in {"football", "basketball"}:
         requested_sport = preferred_sports[0] if preferred_sports else "football"
 
-    slip_rows = _choose_slip_rows(sport=requested_sport, slip_size=slip_size, min_probability=70.0)
+    slip_rows = _choose_slip_rows(sport=requested_sport, slip_size=slip_size, min_probability=60.0)
     _store_bot_slip(user_id=user_id, update=update, sport=requested_sport, slip_size=slip_size, slip_rows=slip_rows)
     message = _format_slip_message(sport=requested_sport, slip_rows=slip_rows, slip_size=slip_size)
     await _reply_logged(update, context, message, user_id=user_id, intent=f"slip_{slip_size}_response", parse_mode="HTML")
