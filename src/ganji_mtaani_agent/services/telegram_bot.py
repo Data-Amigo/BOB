@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from dotenv import load_dotenv
-from openai import OpenAI
+from anthropic import Anthropic
 from psycopg.rows import dict_row
 from telegram import (
     InlineKeyboardButton,
@@ -75,8 +75,8 @@ logger = logging.getLogger(__name__)
 @dataclass(frozen=True, slots=True)
 class TelegramBotConfig:
     token: str
-    openai_api_key: str | None = None
-    openai_model: str = "gpt-5-mini"
+    anthropic_api_key: str | None = None
+    claude_model: str = "claude-haiku-4-5-20251001"
     default_slip_size: int = 3
     slip_min_probability: float = 70.0
     default_stake_kes: float = 100.0
@@ -88,8 +88,8 @@ class TelegramBotConfig:
             raise RuntimeError("TELEGRAM_BOT_TOKEN is missing. Set it in the project root .env file.")
         return cls(
             token=token,
-            openai_api_key=os.getenv("OPENAI_API_KEY"),
-            openai_model=os.getenv("OPENAI_MODEL", "gpt-5-mini"),
+            anthropic_api_key=os.getenv("ANTHROPIC_API_KEY"),
+            claude_model=os.getenv("CLAUDE_MODEL", "claude-haiku-4-5-20251001"),
         )
 
 
@@ -150,31 +150,30 @@ def _parse_forebet_event_time(value: str | None) -> str | None:
     return match.group(1) if match else None
 
 
-def _get_openai_client() -> tuple[OpenAI | None, str]:
-    api_key = os.getenv("OPENAI_API_KEY", "").strip()
-    model = os.getenv("OPENAI_MODEL", "gpt-5-mini").strip() or "gpt-5-mini"
+def _get_claude_client() -> tuple[Anthropic | None, str]:
+    api_key = os.getenv("ANTHROPIC_API_KEY", "").strip()
+    model = os.getenv("CLAUDE_MODEL", "claude-haiku-4-5-20251001").strip() or "claude-haiku-4-5-20251001"
     if not api_key:
         return None, model
-    return OpenAI(api_key=api_key), model
+    return Anthropic(api_key=api_key), model
 
 
 def _llm_text(*, system_prompt: str, user_prompt: str, fallback_text: str) -> str:
-    client, model = _get_openai_client()
+    client, model = _get_claude_client()
     if client is None:
         return fallback_text
     try:
-        response = client.chat.completions.create(
+        response = client.messages.create(
             model=model,
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt},
-            ],
+            max_tokens=300,
+            system=system_prompt,
+            messages=[{"role": "user", "content": user_prompt}],
         )
-        content = response.choices[0].message.content if response.choices else None
+        content = response.content[0].text if response.content else None
         if content:
             return str(content).strip()
-    except Exception as exc:  # pragma: no cover - graceful fallback in live bot mode
-        logger.warning("OpenAI response generation failed, using fallback text: %s", exc)
+    except Exception as exc:
+        logger.warning("Claude response generation failed, using fallback text: %s", exc)
     return fallback_text
 
 
@@ -237,6 +236,16 @@ def _detect_slip_size_from_text(text: str, default_value: int = 3) -> int:
     return default_value
 
 
+def _detect_min_probability_from_text(text: str, default_value: float = 60.0) -> float:
+    """Extract an explicit probability threshold like '70%' or '80 percent' from user text."""
+    match = re.search(r"\b(\d{2,3})\s*(?:%|percent)", text.lower())
+    if match:
+        val = int(match.group(1))
+        if 50 <= val <= 99:
+            return float(val)
+    return default_value
+
+
 def _detect_slip_count_from_text(text: str, default_value: int = 3) -> int:
     lowered = text.lower()
     match = re.search(r"(\d+)\s*(?:slips|slip)", lowered)
@@ -254,7 +263,7 @@ def _message_intent(text: str) -> str:
     lowered = text.lower().strip()
     if "tomorrow" in lowered:
         return "games_tomorrow"
-    if any(token in lowered for token in ("today", "games", "fixtures")):
+    if any(token in lowered for token in ("today", "games", "fixtures", "probability", "winning", "confidence", "70%", "80%")):
         return "games_today"
     if "performance" in lowered or "yesterday" in lowered or "result" in lowered:
         return "performance_summary"
@@ -1004,6 +1013,7 @@ async def _reply_with_games_today(
     user_id: int,
     profile: dict[str, Any],
     target_date: date | None = None,
+    min_probability: float = 60.0,
 ) -> None:
     preferred_sports = list(profile.get("preferred_sports_json") or ["football"])
     today = date.today()
@@ -1017,7 +1027,7 @@ async def _reply_with_games_today(
 
     games_by_sport: dict[str, list[dict[str, Any]]] = {}
     for sport in preferred_sports:
-        candidates = _fetch_upcoming_forebet_candidates(sport=sport, min_probability=60.0)
+        candidates = _fetch_upcoming_forebet_candidates(sport=sport, min_probability=min_probability)
         games_by_sport[sport] = candidates
 
     total_visible = sum(
@@ -1477,7 +1487,8 @@ async def fallback_text_handler(update: Update, context: ContextTypes.DEFAULT_TY
         # Let BoB still be useful before full onboarding is complete.
         if intent in ("games_today", "games_tomorrow"):
             td = date.today() + timedelta(days=1) if intent == "games_tomorrow" else None
-            await _reply_with_games_today(update, context, user_id=user_id, profile=profile or {}, target_date=td)
+            min_prob = _detect_min_probability_from_text(incoming_text)
+            await _reply_with_games_today(update, context, user_id=user_id, profile=profile or {}, target_date=td, min_probability=min_prob)
             await _reply_logged(
                 update,
                 context,
@@ -1508,12 +1519,15 @@ async def fallback_text_handler(update: Update, context: ContextTypes.DEFAULT_TY
         profile = _fetch_profile_for_update(update)
 
     if intent == "games_today":
-        await _reply_with_games_today(update, context, user_id=user_id, profile=profile)
+        min_prob = _detect_min_probability_from_text(incoming_text)
+        await _reply_with_games_today(update, context, user_id=user_id, profile=profile, min_probability=min_prob)
         return
     if intent == "games_tomorrow":
+        min_prob = _detect_min_probability_from_text(incoming_text)
         await _reply_with_games_today(
             update, context, user_id=user_id, profile=profile,
             target_date=date.today() + timedelta(days=1),
+            min_probability=min_prob,
         )
         return
     if intent == "generate_slips":
