@@ -1,0 +1,93 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+  <title>BOB — Daily Slips</title>
+  <script src="https://telegram.org/js/telegram-web-app.js"></script>
+  <link rel="stylesheet" href="/static/style.css" />
+</head>
+<body>
+
+  <!-- ===== HEADER ===== -->
+  <header class="header">
+    <div class="header-inner">
+      <div class="header-brand">
+        <span class="header-logo">⚽🏀</span>
+        <span class="header-title">BOB Daily Slips</span>
+      </div>
+      <div class="header-date" id="headerDate"></div>
+    </div>
+  </header>
+
+  <!-- ===== STATS CARDS ===== -->
+  <section class="stats-row">
+    <div class="stat-card">
+      <div class="stat-value" id="statSlipsToday">—</div>
+      <div class="stat-label">Slips Today</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-value" id="statWon">—</div>
+      <div class="stat-label">Won (7d)</div>
+    </div>
+    <div class="stat-card highlight">
+      <div class="stat-value" id="statWinRate">—</div>
+      <div class="stat-label">Win Rate</div>
+    </div>
+  </section>
+
+  <!-- ===== STAKE INPUT ===== -->
+  <section class="stake-section card">
+    <div class="stake-header">
+      <span class="stake-icon">💰</span>
+      <span class="stake-label">Your Daily Stake</span>
+    </div>
+    <div class="stake-row">
+      <span class="stake-currency">KES</span>
+      <input
+        id="stakeInput"
+        class="stake-input"
+        type="number"
+        min="10"
+        max="100000"
+        placeholder="500"
+        inputmode="numeric"
+      />
+      <div class="stake-shortcuts">
+        <button class="chip" data-value="100">100</button>
+        <button class="chip" data-value="200">200</button>
+        <button class="chip" data-value="500">500</button>
+        <button class="chip" data-value="1000">1k</button>
+      </div>
+    </div>
+    <div id="stakeProjection" class="stake-projection">Enter a stake to see projected earnings</div>
+  </section>
+
+  <!-- ===== SPORT TABS ===== -->
+  <div class="tabs">
+    <button class="tab active" data-sport="football">⚽ Football</button>
+    <button class="tab" data-sport="basketball">🏀 Basketball</button>
+  </div>
+
+  <!-- ===== SLIPS CONTAINER ===== -->
+  <main class="slips-container" id="slipsContainer">
+    <div class="loading">
+      <div class="spinner"></div>
+      <p>Loading today's slips…</p>
+    </div>
+  </main>
+
+  <!-- ===== SUCCESSFUL TEAMS ===== -->
+  <section class="teams-section" id="teamsSection" style="display:none">
+    <h3 class="section-title">🏆 Top Winning Teams (7 days)</h3>
+    <div id="teamsList" class="teams-list"></div>
+  </section>
+
+  <!-- ===== FOOTER ===== -->
+  <footer class="footer">
+    <p>BOB Research · Not financial advice · Bet responsibly</p>
+  </footer>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>

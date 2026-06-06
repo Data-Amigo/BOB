@@ -1801,6 +1801,31 @@ async def fallback_text_handler(update: Update, context: ContextTypes.DEFAULT_TY
     await _reply_with_general_answer(update, context, user_id=user_id, profile=profile, request_text=incoming_text)
 
 
+async def app_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Send the Mini App button so users can open the daily slip dashboard."""
+    _log_update_received(update)
+    user_id = _ensure_bot_user(update)
+    webapp_url = os.getenv("BOB_WEBAPP_URL", "").strip()
+    if not webapp_url:
+        await _reply_logged(
+            update, context,
+            "The BOB dashboard is not configured yet. Ask the admin to set BOB_WEBAPP_URL in the server config.",
+            user_id=user_id, intent="app_command_no_url",
+        )
+        return
+
+    from telegram import WebAppInfo
+    keyboard = InlineKeyboardMarkup([[
+        InlineKeyboardButton("📊 Open Daily Slips", web_app=WebAppInfo(url=webapp_url)),
+    ]])
+    await _reply_logged(
+        update, context,
+        "Tap below to open today's Gold, Silver and Bronze slips with earnings calculator:",
+        user_id=user_id, intent="app_command",
+        reply_markup=keyboard,
+    )
+
+
 def build_application(config: TelegramBotConfig | None = None) -> Application:
     selected_config = config or TelegramBotConfig.from_env()
     application = (
@@ -1819,6 +1844,7 @@ def build_application(config: TelegramBotConfig | None = None) -> Application:
     application.add_handler(CommandHandler("today", today_command))
     application.add_handler(CommandHandler("slip3", slip3_command))
     application.add_handler(CommandHandler("slip4", slip4_command))
+    application.add_handler(CommandHandler("app", app_command))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, fallback_text_handler))
     application.add_error_handler(telegram_error_handler)
     return application

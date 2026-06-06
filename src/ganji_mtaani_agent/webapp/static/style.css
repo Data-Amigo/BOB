@@ -1,0 +1,311 @@
+/* ============================================================
+   BOB Mini App — Telegram-themed mobile-first stylesheet
+   Uses CSS vars injected by Telegram Web App SDK
+   ============================================================ */
+
+:root {
+  --bg:            var(--tg-theme-bg-color,           #1a1a2e);
+  --secondary-bg:  var(--tg-theme-secondary-bg-color, #16213e);
+  --text:          var(--tg-theme-text-color,         #eaeaea);
+  --hint:          var(--tg-theme-hint-color,         #8892b0);
+  --accent:        var(--tg-theme-button-color,       #0f3460);
+  --accent-text:   var(--tg-theme-button-text-color,  #ffffff);
+  --link:          var(--tg-theme-link-color,         #57cbff);
+
+  --gold:   #f4c430;
+  --silver: #b0b8c8;
+  --bronze: #cd7f32;
+
+  --radius: 14px;
+  --gap:    12px;
+}
+
+* { box-sizing: border-box; margin: 0; padding: 0; }
+
+html, body {
+  background: var(--bg);
+  color: var(--text);
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  font-size: 15px;
+  line-height: 1.5;
+  min-height: 100vh;
+}
+
+/* ── Header ── */
+.header {
+  background: var(--secondary-bg);
+  border-bottom: 1px solid rgba(255,255,255,.07);
+  padding: 12px 16px;
+  position: sticky;
+  top: 0;
+  z-index: 10;
+}
+.header-inner {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  max-width: 480px;
+  margin: 0 auto;
+}
+.header-brand { display: flex; align-items: center; gap: 8px; }
+.header-logo  { font-size: 22px; }
+.header-title { font-weight: 700; font-size: 17px; }
+.header-date  { font-size: 13px; color: var(--hint); }
+
+/* ── Stats row ── */
+.stats-row {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: var(--gap);
+  padding: 16px 16px 0;
+  max-width: 480px;
+  margin: 0 auto;
+}
+.stat-card {
+  background: var(--secondary-bg);
+  border-radius: var(--radius);
+  padding: 14px 10px;
+  text-align: center;
+}
+.stat-card.highlight { border: 1px solid var(--gold); }
+.stat-value {
+  font-size: 26px;
+  font-weight: 800;
+  line-height: 1.1;
+}
+.stat-card.highlight .stat-value { color: var(--gold); }
+.stat-label {
+  font-size: 11px;
+  color: var(--hint);
+  margin-top: 3px;
+  text-transform: uppercase;
+  letter-spacing: .5px;
+}
+
+/* ── Stake section ── */
+.card {
+  background: var(--secondary-bg);
+  border-radius: var(--radius);
+  padding: 16px;
+}
+.stake-section {
+  margin: 16px;
+  max-width: 480px;
+  margin-left: auto;
+  margin-right: auto;
+}
+.stake-header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-weight: 600;
+  margin-bottom: 12px;
+}
+.stake-icon { font-size: 18px; }
+.stake-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.stake-currency {
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--hint);
+  white-space: nowrap;
+}
+.stake-input {
+  background: var(--bg);
+  border: 1.5px solid rgba(255,255,255,.12);
+  border-radius: 8px;
+  color: var(--text);
+  font-size: 20px;
+  font-weight: 700;
+  padding: 6px 12px;
+  width: 110px;
+  outline: none;
+  transition: border-color .2s;
+}
+.stake-input:focus { border-color: var(--accent); }
+.stake-shortcuts { display: flex; gap: 6px; flex-wrap: wrap; }
+.chip {
+  background: var(--bg);
+  border: 1px solid rgba(255,255,255,.12);
+  border-radius: 20px;
+  color: var(--hint);
+  cursor: pointer;
+  font-size: 13px;
+  padding: 4px 12px;
+  transition: all .15s;
+}
+.chip:hover, .chip.active {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--accent-text);
+}
+.stake-projection {
+  margin-top: 10px;
+  font-size: 13px;
+  color: var(--hint);
+  line-height: 1.6;
+}
+.stake-projection strong { color: var(--text); }
+
+/* ── Tabs ── */
+.tabs {
+  display: flex;
+  gap: 0;
+  padding: 0 16px;
+  margin-top: 16px;
+  max-width: 480px;
+  margin-left: auto;
+  margin-right: auto;
+  border-bottom: 2px solid rgba(255,255,255,.07);
+}
+.tab {
+  background: none;
+  border: none;
+  border-bottom: 2px solid transparent;
+  color: var(--hint);
+  cursor: pointer;
+  font-size: 14px;
+  font-weight: 600;
+  margin-bottom: -2px;
+  padding: 10px 18px;
+  transition: all .15s;
+}
+.tab.active {
+  border-bottom-color: var(--accent);
+  color: var(--text);
+}
+
+/* ── Slips container ── */
+.slips-container {
+  padding: 16px;
+  max-width: 480px;
+  margin: 0 auto;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+/* ── Tier card ── */
+.tier-card {
+  background: var(--secondary-bg);
+  border-radius: var(--radius);
+  overflow: hidden;
+}
+.tier-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 12px 16px;
+}
+.tier-header-left { display: flex; align-items: center; gap: 8px; }
+.tier-badge {
+  border-radius: 8px;
+  font-size: 12px;
+  font-weight: 700;
+  padding: 3px 10px;
+  text-transform: uppercase;
+  letter-spacing: .4px;
+}
+.tier-gold   { background: rgba(244,196,48,.15);  color: var(--gold);   border: 1px solid var(--gold);   }
+.tier-silver { background: rgba(176,184,200,.15); color: var(--silver); border: 1px solid var(--silver); }
+.tier-bronze { background: rgba(205,127,50,.15);  color: var(--bronze); border: 1px solid var(--bronze); }
+
+.tier-range { font-size: 12px; color: var(--hint); }
+.tier-games-count { font-size: 12px; color: var(--hint); }
+
+.tier-legs { padding: 0 16px; }
+
+.leg-row {
+  border-top: 1px solid rgba(255,255,255,.06);
+  padding: 10px 0;
+}
+.leg-teams {
+  font-weight: 600;
+  font-size: 14px;
+  margin-bottom: 4px;
+}
+.leg-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  font-size: 12px;
+  color: var(--hint);
+  align-items: center;
+}
+.leg-pick { color: #4caf82; font-weight: 600; }
+.leg-prob { font-weight: 700; }
+.leg-odds { color: var(--link); }
+.leg-time { color: var(--hint); }
+
+.tier-footer {
+  background: rgba(255,255,255,.03);
+  border-top: 1px solid rgba(255,255,255,.06);
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 10px 16px;
+  font-size: 13px;
+}
+.combined-odds { font-weight: 700; }
+.payout-text { color: var(--hint); }
+
+/* ── No slips message ── */
+.no-slips {
+  text-align: center;
+  color: var(--hint);
+  padding: 40px 20px;
+}
+.no-slips-icon { font-size: 40px; margin-bottom: 12px; }
+
+/* ── Successful teams ── */
+.teams-section {
+  padding: 0 16px 16px;
+  max-width: 480px;
+  margin: 0 auto;
+}
+.section-title {
+  font-size: 15px;
+  font-weight: 700;
+  margin-bottom: 12px;
+}
+.teams-list { display: flex; flex-direction: column; gap: 8px; }
+.team-row {
+  background: var(--secondary-bg);
+  border-radius: 10px;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 14px;
+}
+.team-name { flex: 1; font-weight: 600; font-size: 14px; }
+.team-bar-wrap { flex: 2; height: 6px; background: rgba(255,255,255,.1); border-radius: 3px; }
+.team-bar      { height: 100%; border-radius: 3px; background: var(--gold); transition: width .5s; }
+.team-rate     { font-size: 13px; font-weight: 700; color: var(--gold); min-width: 36px; text-align: right; }
+
+/* ── Loading ── */
+.loading {
+  text-align: center;
+  padding: 60px 20px;
+  color: var(--hint);
+}
+.spinner {
+  width: 32px; height: 32px;
+  border: 3px solid rgba(255,255,255,.1);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  margin: 0 auto 16px;
+  animation: spin .8s linear infinite;
+}
+@keyframes spin { to { transform: rotate(360deg); } }
+
+/* ── Footer ── */
+.footer {
+  padding: 20px 16px 32px;
+  text-align: center;
+  font-size: 11px;
+  color: var(--hint);
+}
