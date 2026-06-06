@@ -9,22 +9,50 @@
 </head>
 <body>
 
+  <!-- ===== ONBOARDING MODAL (shown on first open) ===== -->
+  <div id="onboardingOverlay" class="overlay hidden">
+    <div class="modal">
+      <div class="modal-logo">⚽🏀</div>
+      <h2 class="modal-title">Welcome to BOB</h2>
+      <p class="modal-subtitle">Your personal betting research assistant</p>
+
+      <div class="modal-field">
+        <label class="field-label">What should BOB call you?</label>
+        <input id="nickInput" class="field-input" type="text" placeholder="Your nickname" maxlength="30" />
+      </div>
+
+      <div class="modal-field">
+        <label class="field-label">Phone number <span class="optional">(optional)</span></label>
+        <div class="phone-row">
+          <input id="phoneInput" class="field-input" type="tel" placeholder="+254 7XX XXX XXX" />
+          <button id="sharePhoneBtn" class="btn-outline">📱 Share</button>
+        </div>
+        <p class="field-hint">Used to track your slips across devices</p>
+      </div>
+
+      <button id="onboardingDone" class="btn-primary" disabled>Get Started →</button>
+    </div>
+  </div>
+
   <!-- ===== HEADER ===== -->
   <header class="header">
     <div class="header-inner">
       <div class="header-brand">
         <span class="header-logo">⚽🏀</span>
-        <span class="header-title">BOB Daily Slips</span>
+        <div>
+          <div class="header-title">BOB Daily Slips</div>
+          <div class="header-user" id="headerUser"></div>
+        </div>
       </div>
       <div class="header-date" id="headerDate"></div>
     </div>
   </header>
 
-  <!-- ===== STATS CARDS ===== -->
+  <!-- ===== PERSONAL STATS ===== -->
   <section class="stats-row">
     <div class="stat-card">
       <div class="stat-value" id="statSlipsToday">—</div>
-      <div class="stat-label">Slips Today</div>
+      <div class="stat-label">My Slips</div>
     </div>
     <div class="stat-card">
       <div class="stat-value" id="statWon">—</div>
@@ -40,19 +68,12 @@
   <section class="stake-section card">
     <div class="stake-header">
       <span class="stake-icon">💰</span>
-      <span class="stake-label">Your Daily Stake</span>
+      <span class="stake-label">Daily Stake</span>
+      <span class="stake-earned" id="stakeEarned"></span>
     </div>
     <div class="stake-row">
       <span class="stake-currency">KES</span>
-      <input
-        id="stakeInput"
-        class="stake-input"
-        type="number"
-        min="10"
-        max="100000"
-        placeholder="500"
-        inputmode="numeric"
-      />
+      <input id="stakeInput" class="stake-input" type="number" min="10" max="100000" placeholder="500" inputmode="numeric" />
       <div class="stake-shortcuts">
         <button class="chip" data-value="100">100</button>
         <button class="chip" data-value="200">200</button>
@@ -63,25 +84,39 @@
     <div id="stakeProjection" class="stake-projection">Enter a stake to see projected earnings</div>
   </section>
 
-  <!-- ===== SPORT TABS ===== -->
+  <!-- ===== MAIN TABS ===== -->
   <div class="tabs">
-    <button class="tab active" data-sport="football">⚽ Football</button>
-    <button class="tab" data-sport="basketball">🏀 Basketball</button>
+    <button class="tab active" data-tab="slips">📋 Today's Slips</button>
+    <button class="tab" data-tab="history">🕓 My History</button>
+    <button class="tab" data-tab="teams">🏆 Top Teams</button>
   </div>
 
-  <!-- ===== SLIPS CONTAINER ===== -->
-  <main class="slips-container" id="slipsContainer">
-    <div class="loading">
-      <div class="spinner"></div>
-      <p>Loading today's slips…</p>
+  <!-- ===== SPORT SUB-TABS (shown in slips tab) ===== -->
+  <div class="sport-tabs" id="sportTabs">
+    <button class="sport-tab active" data-sport="football">⚽ Football</button>
+    <button class="sport-tab" data-sport="basketball">🏀 Basketball</button>
+  </div>
+
+  <!-- ===== SLIPS TAB ===== -->
+  <main class="tab-panel active" id="panelSlips">
+    <div class="slips-container" id="slipsContainer">
+      <div class="loading"><div class="spinner"></div><p>Loading today's slips…</p></div>
     </div>
   </main>
 
-  <!-- ===== SUCCESSFUL TEAMS ===== -->
-  <section class="teams-section" id="teamsSection" style="display:none">
-    <h3 class="section-title">🏆 Top Winning Teams (7 days)</h3>
-    <div id="teamsList" class="teams-list"></div>
-  </section>
+  <!-- ===== HISTORY TAB ===== -->
+  <div class="tab-panel" id="panelHistory">
+    <div class="slips-container" id="historyContainer">
+      <div class="loading"><div class="spinner"></div><p>Loading your slip history…</p></div>
+    </div>
+  </div>
+
+  <!-- ===== TEAMS TAB ===== -->
+  <div class="tab-panel" id="panelTeams">
+    <div class="slips-container" id="teamsContainer">
+      <div class="loading"><div class="spinner"></div><p>Loading top teams…</p></div>
+    </div>
+  </div>
 
   <!-- ===== FOOTER ===== -->
   <footer class="footer">

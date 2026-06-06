@@ -209,6 +209,249 @@ def get_successful_teams(days: int = 7) -> list[dict[str, Any]]:
 
 
 # =============================================================================
+# API — User registration / profile
+# =============================================================================
+class UserRegisterBody(BaseModel):
+    telegram_user_id: str
+    first_name: str | None = None
+    last_name: str | None = None
+    username: str | None = None
+    preferred_name: str | None = None
+    phone_number: str | None = None
+
+
+class UserUpdateBody(BaseModel):
+    preferred_name: str | None = None
+    phone_number: str | None = None
+    daily_stake_kes: float | None = None
+
+
+@app.post("/api/user/register")
+def register_user(body: UserRegisterBody) -> dict[str, Any]:
+    """Register or retrieve a user by Telegram ID. Called on every Mini App open."""
+    with get_postgres_connection(autocommit=True) as conn, conn.cursor(row_factory=dict_row) as cur:
+        # Upsert into bot_users
+        cur.execute(
+            """
+            INSERT INTO bot_users (channel, channel_user_id, first_name, last_name, username, status, last_seen_at)
+            VALUES ('telegram', %s, %s, %s, %s, 'active', NOW())
+            ON CONFLICT (channel, channel_user_id) DO UPDATE
+              SET first_name   = COALESCE(EXCLUDED.first_name,  bot_users.first_name),
+                  last_name    = COALESCE(EXCLUDED.last_name,   bot_users.last_name),
+                  username     = COALESCE(EXCLUDED.username,    bot_users.username),
+                  last_seen_at = NOW()
+            RETURNING id
+            """,
+            (body.telegram_user_id, body.first_name, body.last_name, body.username),
+        )
+        row = cur.fetchone()
+        user_id = row["id"]
+
+        # Upsert preferences if provided
+        cur.execute(
+            """
+            INSERT INTO bot_user_preferences (user_id)
+            VALUES (%s)
+            ON CONFLICT (user_id) DO NOTHING
+            """,
+            (user_id,),
+        )
+        if body.preferred_name:
+            cur.execute(
+                "UPDATE bot_user_preferences SET preferred_name = %s WHERE user_id = %s",
+                (body.preferred_name, user_id),
+            )
+        if body.phone_number:
+            cur.execute(
+                "UPDATE bot_users SET phone_number = %s WHERE id = %s",
+                (body.phone_number, user_id),
+            )
+
+        # Fetch full profile
+        cur.execute(
+            """
+            SELECT bu.id, bu.first_name, bu.last_name, bu.username, bu.phone_number,
+                   bup.preferred_name, bup.preferred_slip_size, bup.risk_profile,
+                   COALESCE(bup.stake_kes, 500) AS daily_stake_kes
+            FROM bot_users bu
+            LEFT JOIN bot_user_preferences bup ON bup.user_id = bu.id
+            WHERE bu.id = %s
+            """,
+            (user_id,),
+        )
+        profile = dict(cur.fetchone() or {})
+
+    display_name = (
+        profile.get("preferred_name")
+        or profile.get("first_name")
+        or profile.get("username")
+        or "Bettor"
+    )
+    return {
+        "user_id": profile.get("id"),
+        "display_name": display_name,
+        "first_name": profile.get("first_name"),
+        "last_name": profile.get("last_name"),
+        "username": profile.get("username"),
+        "phone_number": profile.get("phone_number"),
+        "preferred_name": profile.get("preferred_name"),
+        "daily_stake_kes": float(profile.get("daily_stake_kes") or 500),
+        "risk_profile": profile.get("risk_profile"),
+        "is_new": not bool(profile.get("preferred_name")),
+    }
+
+
+@app.patch("/api/user/{telegram_user_id}")
+def update_user(telegram_user_id: str, body: UserUpdateBody) -> dict[str, Any]:
+    """Update preferred name, phone number, or daily stake."""
+    with get_postgres_connection(autocommit=True) as conn, conn.cursor(row_factory=dict_row) as cur:
+        cur.execute(
+            "SELECT id FROM bot_users WHERE channel = 'telegram' AND channel_user_id = %s",
+            (telegram_user_id,),
+        )
+        row = cur.fetchone()
+        if not row:
+            return {"ok": False, "error": "User not found"}
+        user_id = row["id"]
+
+        if body.preferred_name is not None:
+            cur.execute(
+                "UPDATE bot_user_preferences SET preferred_name = %s WHERE user_id = %s",
+                (body.preferred_name, user_id),
+            )
+            cur.execute(
+                "UPDATE bot_users SET pseudo_name = %s WHERE id = %s",
+                (body.preferred_name, user_id),
+            )
+        if body.phone_number is not None:
+            cur.execute(
+                "UPDATE bot_users SET phone_number = %s WHERE id = %s",
+                (body.phone_number, user_id),
+            )
+        if body.daily_stake_kes is not None:
+            cur.execute(
+                """
+                INSERT INTO bot_user_preferences (user_id, stake_kes)
+                VALUES (%s, %s)
+                ON CONFLICT (user_id) DO UPDATE SET stake_kes = EXCLUDED.stake_kes
+                """,
+                (user_id, body.daily_stake_kes),
+            )
+
+    return {"ok": True}
+
+
+# =============================================================================
+# API — Per-user slip history and earnings
+# =============================================================================
+@app.get("/api/user/{telegram_user_id}/stats")
+def get_user_stats(telegram_user_id: str, days: int = 7) -> dict[str, Any]:
+    """Personal slip stats and estimated earnings for a specific user."""
+    cutoff = date.today() - timedelta(days=days)
+
+    with get_postgres_connection() as conn, conn.cursor(row_factory=dict_row) as cur:
+        cur.execute(
+            "SELECT id FROM bot_users WHERE channel = 'telegram' AND channel_user_id = %s",
+            (telegram_user_id,),
+        )
+        user_row = cur.fetchone()
+        if not user_row:
+            return {"total": 0, "won": 0, "lost": 0, "pending": 0, "win_rate": 0, "earned_kes": 0}
+        user_id = user_row["id"]
+
+        cur.execute(
+            """
+            SELECT
+                COUNT(*) AS total,
+                COUNT(CASE WHEN status = 'won'  THEN 1 END) AS won,
+                COUNT(CASE WHEN status = 'lost' THEN 1 END) AS lost,
+                COUNT(CASE WHEN status = 'pending' THEN 1 END) AS pending,
+                COALESCE(SUM(CASE WHEN status = 'won' AND total_combined_odds IS NOT NULL
+                    THEN total_combined_odds ELSE 0 END), 0) AS total_odds_won
+            FROM bot_slips
+            WHERE user_id = %s AND created_at >= %s
+            """,
+            (user_id, cutoff),
+        )
+        stats = dict(cur.fetchone() or {})
+
+        cur.execute(
+            "SELECT COALESCE(stake_kes, 500) AS daily_stake FROM bot_user_preferences WHERE user_id = %s",
+            (user_id,),
+        )
+        pref = cur.fetchone()
+        daily_stake = float((pref or {}).get("daily_stake") or 500)
+
+    total = int(stats.get("total") or 0)
+    won = int(stats.get("won") or 0)
+    lost = int(stats.get("lost") or 0)
+    resolved = won + lost
+    win_rate = round(100 * won / resolved) if resolved > 0 else 0
+    earned_kes = round(float(stats.get("total_odds_won") or 0) * daily_stake, 0)
+
+    return {
+        "total": total,
+        "won": won,
+        "lost": lost,
+        "pending": int(stats.get("pending") or 0),
+        "win_rate": win_rate,
+        "daily_stake_kes": daily_stake,
+        "earned_kes": earned_kes,
+    }
+
+
+@app.get("/api/user/{telegram_user_id}/slips")
+def get_user_slips(telegram_user_id: str, limit: int = 20) -> list[dict[str, Any]]:
+    """Recent slip history for a user with legs."""
+    with get_postgres_connection() as conn, conn.cursor(row_factory=dict_row) as cur:
+        cur.execute(
+            "SELECT id FROM bot_users WHERE channel = 'telegram' AND channel_user_id = %s",
+            (telegram_user_id,),
+        )
+        user_row = cur.fetchone()
+        if not user_row:
+            return []
+        user_id = user_row["id"]
+
+        cur.execute(
+            """
+            SELECT bs.id, bs.sport, bs.slip_size, bs.status, bs.event_date,
+                   bs.total_combined_odds, bs.created_at,
+                   COALESCE(bup.stake_kes, 500) AS stake_kes
+            FROM bot_slips bs
+            LEFT JOIN bot_user_preferences bup ON bup.user_id = bs.user_id
+            WHERE bs.user_id = %s
+            ORDER BY bs.created_at DESC
+            LIMIT %s
+            """,
+            (user_id, limit),
+        )
+        slips = [dict(r) for r in cur.fetchall()]
+
+        # Attach legs to each slip
+        for slip in slips:
+            cur.execute(
+                """
+                SELECT leg_no, home_team, away_team, pred_outcome, pred_probability,
+                       selected_odds, probability_bucket, competition
+                FROM bot_slip_legs
+                WHERE slip_id = %s
+                ORDER BY leg_no
+                """,
+                (slip["id"],),
+            )
+            slip["legs"] = [dict(r) for r in cur.fetchall()]
+            slip["event_date"] = slip["event_date"].isoformat() if slip.get("event_date") else None
+            slip["created_at"] = slip["created_at"].isoformat() if slip.get("created_at") else None
+            stake = float(slip.get("stake_kes") or 500)
+            odds = float(slip.get("total_combined_odds") or 1.0)
+            slip["payout_kes"] = round(stake * odds) if slip.get("status") == "won" else None
+            slip["stake_kes"] = stake
+
+    return slips
+
+
+# =============================================================================
 # Static files (must be last so API routes are matched first)
 # =============================================================================
 app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
