@@ -246,6 +246,31 @@ def _detect_min_probability_from_text(text: str, default_value: float = 60.0) ->
     return default_value
 
 
+def _detect_sport_explicitly(text: str) -> str | None:
+    """Return sport only if its name appears in the message, else None."""
+    lowered = text.lower()
+    if "basketball" in lowered:
+        return "basketball"
+    if "football" in lowered or "soccer" in lowered:
+        return "football"
+    return None
+
+
+def _detect_stake_from_text(text: str) -> float | None:
+    """Extract a KES stake like 'invested 500', 'stake 200', '1000 ksh'."""
+    lowered = text.lower()
+    m = re.search(r"(?:invest(?:ed)?|stake[d]?|put|bet)\s+(\d{2,6})", lowered)
+    if not m:
+        m = re.search(r"(?:ksh?|kes|kshs?)\s*[\s:]*(\d{2,6})", lowered)
+    if not m:
+        m = re.search(r"\b(\d{2,6})\s*(?:ksh?|kes|kshs?|/-)", lowered)
+    if m:
+        val = int(m.group(1))
+        if 10 <= val <= 100_000:
+            return float(val)
+    return None
+
+
 def _detect_slip_count_from_text(text: str, default_value: int = 3) -> int:
     lowered = text.lower()
     match = re.search(r"(\d+)\s*(?:slips|slip)", lowered)
@@ -261,6 +286,8 @@ def _detect_slip_count_from_text(text: str, default_value: int = 3) -> int:
 
 def _message_intent(text: str) -> str:
     lowered = text.lower().strip()
+    if any(tok in lowered for tok in ("earn", "invest", "how much", "profit", "payout", "would i get", "stake")):
+        return "earnings_calc"
     if "tomorrow" in lowered:
         return "games_tomorrow"
     if any(token in lowered for token in ("today", "games", "fixtures", "probability", "winning", "confidence", "70%", "80%")):
@@ -1006,6 +1033,112 @@ async def _process_onboarding_text(
     return False
 
 
+def _fetch_recent_performance(*, user_id: int, days: int = 7) -> dict[str, Any]:
+    cutoff = date.today() - timedelta(days=days)
+    with get_postgres_connection() as conn, conn.cursor(row_factory=dict_row) as cur:
+        cur.execute(
+            """
+            SELECT
+                COUNT(*) AS total_slips,
+                COUNT(CASE WHEN status = 'won' THEN 1 END) AS won,
+                COUNT(CASE WHEN status = 'lost' THEN 1 END) AS lost,
+                COUNT(CASE WHEN status = 'pending' THEN 1 END) AS pending
+            FROM bot_slips
+            WHERE user_id = %s AND created_at >= %s
+            """,
+            (user_id, cutoff),
+        )
+        row = cur.fetchone()
+        return dict(row) if row else {"total_slips": 0, "won": 0, "lost": 0, "pending": 0}
+
+
+def _generate_tiered_slips(*, sport: str, slip_size: int) -> list[tuple[str, str, list[dict[str, Any]]]]:
+    """Return one Gold/Silver/Bronze slip each, organized by probability tier."""
+    all_candidates = _fetch_upcoming_forebet_candidates(sport=sport, min_probability=70.0)
+    today = date.today()
+
+    tier_defs = [
+        ("Gold",   "90-100%", 90.0, 101.0),
+        ("Silver", "80-90%",  80.0,  90.0),
+        ("Bronze", "70-80%",  70.0,  80.0),
+    ]
+    result: list[tuple[str, str, list[dict[str, Any]]]] = []
+    for tier_name, tier_range, min_p, max_p in tier_defs:
+        tier_games = [r for r in all_candidates if min_p <= (r.get("pred_probability") or 0.0) < max_p]
+        if not tier_games:
+            continue
+        today_pool = [r for r in tier_games if r.get("event_date") == today]
+        pool = today_pool if today_pool else tier_games
+        enriched = _attach_best_odds(pool[:slip_size], sport=sport)
+        result.append((tier_name, tier_range, enriched))
+    return result
+
+
+def _format_tiered_slip_message(
+    *,
+    sport: str,
+    tiered_slips: list[tuple[str, str, list[dict[str, Any]]]],
+    slip_size: int,
+    stake: float | None = None,
+) -> str:
+    if not tiered_slips:
+        return (
+            f"😕 No {sport} games at 70%+ right now.\n"
+            "Try again after the next data refresh."
+        )
+    sport_emoji = _SPORT_EMOJIS.get(sport, "🎯")
+    leg_nums = ["1️⃣", "2️⃣", "3️⃣", "4️⃣"]
+    tier_header_emojis = {"Gold": "🥇", "Silver": "🥈", "Bronze": "🥉"}
+    stake_amounts = [stake] if stake else [500.0, 1_000.0]
+    _FALLBACK_ODDS = 1.5
+
+    lines = [f"{sport_emoji} <b>BOB {_he(sport.title())} Slips by Tier</b>", ""]
+
+    for tier_name, tier_range, rows in tiered_slips:
+        t_emoji = tier_header_emojis.get(tier_name, "🎯")
+        event_date = rows[0].get("event_date") if rows else None
+        date_str = f"{event_date.day} {event_date.strftime('%b')}" if isinstance(event_date, date) else "TBD"
+
+        lines.append(f"━━━━━━━━━━━━━━━━━━━━━━")
+        lines.append(f"{t_emoji} <b>{tier_name} Slip</b> ({tier_range})  ·  📅 {date_str}  ·  {len(rows)} picks")
+        lines.append("")
+
+        combined_odds = 1.0
+        for idx, row in enumerate(rows, start=1):
+            num = leg_nums[idx - 1] if idx <= len(leg_nums) else f"{idx}."
+            prob = float(row.get("pred_probability") or 0.0)
+            odds_value = row.get("selected_odds")
+            outcome = str(row.get("pred_outcome") or "")
+            outcome_label = _OUTCOME_LABELS.get(outcome, outcome)
+            time_str = row.get("event_time") or ""
+            time_part = f" 🕐 {time_str}" if time_str else ""
+
+            if isinstance(odds_value, float):
+                display_odds = odds_value
+                bookmaker = _he(row.get("bookmaker_source") or "")
+                odds_str = f"<b>{display_odds:.2f}</b>" + (f" via {bookmaker}" if bookmaker else "")
+            else:
+                display_odds = _FALLBACK_ODDS
+                odds_str = f"<b>~{display_odds:.2f}</b> <i>(est.)</i>"
+
+            combined_odds *= display_odds
+            lines.append(f"  {num} <b>{_he(row.get('home_team'))} vs {_he(row.get('away_team'))}</b>{time_part}")
+            lines.append(f"      ✅ <b>{_he(outcome)} — {_he(outcome_label)}</b>  📊 <b>{prob:.0f}%</b>")
+            lines.append(f"      💰 {odds_str}")
+            lines.append("")
+
+        lines.append(f"  💎 <b>Combined: {combined_odds:.2f}x</b>")
+        payout_parts = "  ·  ".join(
+            f"KES {int(s):,} → ~KES {combined_odds * s:,.0f}" for s in stake_amounts
+        )
+        lines.append(f"  💵 {payout_parts}")
+        lines.append("")
+
+    lines.append("━━━━━━━━━━━━━━━━━━━━━━")
+    lines.append("💬 Ask: <i>basketball slips · tomorrow picks · how much if I stake 200</i>")
+    return "\n".join(lines).strip()
+
+
 async def _reply_with_games_today(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
@@ -1014,8 +1147,9 @@ async def _reply_with_games_today(
     profile: dict[str, Any],
     target_date: date | None = None,
     min_probability: float = 60.0,
+    sports_filter: list[str] | None = None,
 ) -> None:
-    preferred_sports = list(profile.get("preferred_sports_json") or ["football"])
+    preferred_sports = sports_filter or list(profile.get("preferred_sports_json") or ["football"])
     today = date.today()
     tomorrow = today + timedelta(days=1)
 
@@ -1095,16 +1229,36 @@ async def _reply_with_slips(
     sport = _detect_sport_from_text(request_text, preferred_sports)
     default_slip_size = int(profile.get("preferred_slip_size") or 3)
     slip_size = _detect_slip_size_from_text(request_text, default_value=default_slip_size)
-    slip_count = _detect_slip_count_from_text(request_text, default_value=3)
-    slips = _generate_slips(sport=sport, slip_size=slip_size, slip_count=slip_count, min_probability=70.0)
-    _store_generated_slips(user_id=user_id, update=update, sport=sport, slip_size=slip_size, slips=slips)
-    message = _format_multi_slip_message(
-        sport=sport,
-        slips=slips,
-        slip_size=slip_size,
-        requested_count=slip_count,
+
+    tiered = _generate_tiered_slips(sport=sport, slip_size=slip_size)
+
+    # Store each tier's slip in the DB for tracking
+    for _, _, rows in tiered:
+        if rows:
+            _store_bot_slip(user_id=user_id, update=update, sport=sport, slip_size=slip_size, slip_rows=rows)
+
+    message = _format_tiered_slip_message(sport=sport, tiered_slips=tiered, slip_size=slip_size)
+    await _reply_logged(update, context, message, user_id=user_id, intent="tiered_slip_response", parse_mode="HTML")
+
+
+async def _reply_with_earnings_calc(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    *,
+    user_id: int,
+    profile: dict[str, Any],
+    request_text: str,
+) -> None:
+    stake = _detect_stake_from_text(request_text) or 500.0
+    preferred_sports = list(profile.get("preferred_sports_json") or ["football"])
+    sport = _detect_sport_from_text(request_text, preferred_sports)
+    slip_size = int(profile.get("preferred_slip_size") or 3)
+
+    tiered = _generate_tiered_slips(sport=sport, slip_size=slip_size)
+    message = _format_tiered_slip_message(
+        sport=sport, tiered_slips=tiered, slip_size=slip_size, stake=stake
     )
-    await _reply_logged(update, context, message, user_id=user_id, intent="multi_slip_response", parse_mode="HTML")
+    await _reply_logged(update, context, message, user_id=user_id, intent="earnings_calc_response", parse_mode="HTML")
 
 
 async def _reply_with_general_answer(
@@ -1116,21 +1270,59 @@ async def _reply_with_general_answer(
     request_text: str,
 ) -> None:
     preferred_name = profile.get("preferred_name") or profile.get("pseudo_name") or profile.get("first_name") or "there"
+    preferred_sports = list(profile.get("preferred_sports_json") or ["football"])
+    slip_size = int(profile.get("preferred_slip_size") or 3)
+
+    # Build today's slip context
+    slip_context_parts: list[str] = []
+    for sport in preferred_sports:
+        tiered = _generate_tiered_slips(sport=sport, slip_size=slip_size)
+        for tier_name, tier_range, rows in tiered:
+            if rows:
+                summary = ", ".join(
+                    f"{r.get('home_team')} vs {r.get('away_team')} "
+                    f"(pick {r.get('pred_outcome')}, {r.get('pred_probability'):.0f}%, "
+                    f"odds {r.get('selected_odds') or '~1.50'})"
+                    for r in rows
+                )
+                combined = 1.0
+                for r in rows:
+                    combined *= float(r.get("selected_odds") or 1.5)
+                slip_context_parts.append(
+                    f"{tier_name} {sport} slip ({tier_range}): {summary} — combined odds {combined:.2f}x"
+                )
+
+    # Recent performance
+    perf = _fetch_recent_performance(user_id=user_id)
+    total = perf.get("total_slips") or 0
+    won = perf.get("won") or 0
+    perf_text = (
+        f"Last 7 days: {won}/{total} slips resolved as won ({100*won//total}% hit rate)."
+        if total > 0
+        else "No resolved slips in the last 7 days yet."
+    )
+
+    context_block = "\n".join(slip_context_parts) if slip_context_parts else "No slips above 70% available today."
+
     response_text = _llm_text(
         system_prompt=(
-            "You are BoB, a conversational betting research assistant. "
-            "Reply naturally, explain what you can do, and suggest the next useful action. "
-            "Do not promise guaranteed winnings."
+            "You are BOB, a sharp betting research assistant. "
+            "You have access to today's Gold/Silver/Bronze slip data and recent performance. "
+            "Answer the user's question directly using the provided data. "
+            "If asked about earnings, calculate from the slip odds and the mentioned stake. "
+            "Never promise guaranteed wins. Keep replies short and specific."
         ),
         user_prompt=(
-            f"User name: {preferred_name}. "
-            f"User message: {request_text}. "
-            "Available capabilities: explain today's games, generate football or basketball slips, summarize profile, and later performance. "
-            "Write a short natural reply that answers and nudges the user toward asking for games or slips."
+            f"User: {preferred_name} | Risk profile: {profile.get('risk_profile', 'not set')}\n"
+            f"Today's slips:\n{context_block}\n"
+            f"Performance: {perf_text}\n"
+            f"User message: {request_text}\n\n"
+            "Answer directly. If it's about earnings or a stake amount, do the maths. "
+            "If it's about today's games, reference the slip data above."
         ),
         fallback_text=(
-            f"Hi {preferred_name}. I can help you with today's games, generate football or basketball slips, "
-            "and explain the high-probability pools. Try asking 'what games do we have today?' or 'give me 3 football slips'."
+            f"Hi {preferred_name}. Ask me: 'give me football slips', 'basketball tomorrow 70%+', "
+            "or 'how much if I stake 500'."
         ),
     )
     await _reply_logged(update, context, response_text, user_id=user_id, intent="general_conversational_reply")
@@ -1518,16 +1710,24 @@ async def fallback_text_handler(update: Update, context: ContextTypes.DEFAULT_TY
             return
         profile = _fetch_profile_for_update(update)
 
+    if intent == "earnings_calc":
+        await _reply_with_earnings_calc(update, context, user_id=user_id, profile=profile, request_text=incoming_text)
+        return
     if intent == "games_today":
         min_prob = _detect_min_probability_from_text(incoming_text)
-        await _reply_with_games_today(update, context, user_id=user_id, profile=profile, min_probability=min_prob)
+        explicit_sport = _detect_sport_explicitly(incoming_text)
+        sports_filter = [explicit_sport] if explicit_sport else None
+        await _reply_with_games_today(update, context, user_id=user_id, profile=profile, min_probability=min_prob, sports_filter=sports_filter)
         return
     if intent == "games_tomorrow":
         min_prob = _detect_min_probability_from_text(incoming_text)
+        explicit_sport = _detect_sport_explicitly(incoming_text)
+        sports_filter = [explicit_sport] if explicit_sport else None
         await _reply_with_games_today(
             update, context, user_id=user_id, profile=profile,
             target_date=date.today() + timedelta(days=1),
             min_probability=min_prob,
+            sports_filter=sports_filter,
         )
         return
     if intent == "generate_slips":
