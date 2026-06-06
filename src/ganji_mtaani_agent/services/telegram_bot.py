@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Any
 
 from dotenv import load_dotenv
-from anthropic import Anthropic
+from openai import OpenAI
 from psycopg.rows import dict_row
 from telegram import (
     InlineKeyboardButton,
@@ -76,8 +76,8 @@ logger = logging.getLogger(__name__)
 @dataclass(frozen=True, slots=True)
 class TelegramBotConfig:
     token: str
-    anthropic_api_key: str | None = None
-    claude_model: str = "claude-haiku-4-5-20251001"
+    openai_api_key: str | None = None
+    openai_model: str = "gpt-4o-mini"
     default_slip_size: int = 3
     slip_min_probability: float = 70.0
     default_stake_kes: float = 100.0
@@ -89,8 +89,8 @@ class TelegramBotConfig:
             raise RuntimeError("TELEGRAM_BOT_TOKEN is missing. Set it in the project root .env file.")
         return cls(
             token=token,
-            anthropic_api_key=os.getenv("ANTHROPIC_API_KEY"),
-            claude_model=os.getenv("CLAUDE_MODEL", "claude-haiku-4-5-20251001"),
+            openai_api_key=os.getenv("OPENAI_API_KEY"),
+            openai_model=os.getenv("OPENAI_MODEL", "gpt-4o-mini"),
         )
 
 
@@ -151,30 +151,32 @@ def _parse_forebet_event_time(value: str | None) -> str | None:
     return match.group(1) if match else None
 
 
-def _get_claude_client() -> tuple[Anthropic | None, str]:
-    api_key = os.getenv("ANTHROPIC_API_KEY", "").strip()
-    model = os.getenv("CLAUDE_MODEL", "claude-haiku-4-5-20251001").strip() or "claude-haiku-4-5-20251001"
+def _get_llm_client() -> tuple[OpenAI | None, str]:
+    api_key = os.getenv("OPENAI_API_KEY", "").strip()
+    model = os.getenv("OPENAI_MODEL", "gpt-4o-mini").strip() or "gpt-4o-mini"
     if not api_key:
         return None, model
-    return Anthropic(api_key=api_key), model
+    return OpenAI(api_key=api_key), model
 
 
 def _llm_text(*, system_prompt: str, user_prompt: str, fallback_text: str) -> str:
-    client, model = _get_claude_client()
+    client, model = _get_llm_client()
     if client is None:
         return fallback_text
     try:
-        response = client.messages.create(
+        response = client.chat.completions.create(
             model=model,
-            max_tokens=300,
-            system=system_prompt,
-            messages=[{"role": "user", "content": user_prompt}],
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ],
+            max_tokens=400,
         )
-        content = response.content[0].text if response.content else None
+        content = response.choices[0].message.content if response.choices else None
         if content:
             return str(content).strip()
     except Exception as exc:
-        logger.warning("Claude response generation failed, using fallback text: %s", exc)
+        logger.warning("LLM response generation failed, using fallback text: %s", exc)
     return fallback_text
 
 
