@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import html
+import json as _json
 import logging
 import os
 import re
@@ -175,6 +176,52 @@ def _llm_text(*, system_prompt: str, user_prompt: str, fallback_text: str) -> st
     except Exception as exc:
         logger.warning("Claude response generation failed, using fallback text: %s", exc)
     return fallback_text
+
+
+_INTENT_SYSTEM_PROMPT = """\
+You are the intent parser for BOB, a Kenyan sports betting research assistant.
+Parse the user message and return ONLY valid JSON — no explanation, no markdown.
+
+Schema:
+{
+  "intent": "generate_slips" | "games_list" | "games_tomorrow" | "earnings_calc" | "performance" | "greeting" | "general",
+  "sports": ["football"] | ["basketball"] | ["football","basketball"],
+  "min_probability": 70 | 80 | 90 | 60 | null,
+  "stake_kes": number | null,
+  "slip_size": 3 | 4 | null
+}
+
+Intent rules:
+- "generate_slips": user wants slips, picks, or betting selections built
+- "games_list": user wants to browse available games or fixtures for today
+- "games_tomorrow": user asks about tomorrow specifically
+- "earnings_calc": user asks about earnings, profit, how much they would win
+- "performance": user asks about past results or win rates
+- "greeting": simple hi/hello
+- "general": anything else
+
+Always include all sports mentioned. Use min_probability from any percentage in the message, else null.\
+"""
+
+
+def _parse_intent_with_claude(text: str) -> dict[str, Any]:
+    """Use Claude to extract structured intent. Falls back to {} if Claude unavailable."""
+    raw = _llm_text(
+        system_prompt=_INTENT_SYSTEM_PROMPT,
+        user_prompt=text,
+        fallback_text="",
+    )
+    if not raw:
+        return {}
+    try:
+        return _json.loads(raw)
+    except Exception:
+        # Claude sometimes wraps JSON in markdown — strip fences and retry
+        cleaned = re.sub(r"```(?:json)?|```", "", raw).strip()
+        try:
+            return _json.loads(cleaned)
+        except Exception:
+            return {}
 
 
 def _normalize_sport_choice(value: str | None) -> list[str]:
@@ -1227,19 +1274,22 @@ async def _reply_with_slips(
     user_id: int,
     profile: dict[str, Any],
     request_text: str,
+    sports_override: list[str] | None = None,
 ) -> None:
     preferred_sports = list(profile.get("preferred_sports_json") or ["football"])
     default_slip_size = int(profile.get("preferred_slip_size") or 3)
     slip_size = _detect_slip_size_from_text(request_text, default_value=default_slip_size)
-    lowered = request_text.lower()
 
-    # Determine which sports to generate slips for
-    both_mentioned = "football" in lowered and "basketball" in lowered
-    if both_mentioned:
-        sports_to_use = ["football", "basketball"]
+    # Priority: Claude-parsed override > both keywords in text > explicit keyword > profile preference
+    if sports_override:
+        sports_to_use = sports_override
     else:
-        explicit = _detect_sport_explicitly(request_text)
-        sports_to_use = [explicit] if explicit else preferred_sports
+        lowered = request_text.lower()
+        if "football" in lowered and "basketball" in lowered:
+            sports_to_use = ["football", "basketball"]
+        else:
+            explicit = _detect_sport_explicitly(request_text)
+            sports_to_use = [explicit] if explicit else preferred_sports
 
     for sport in sports_to_use:
         tiered = _generate_tiered_slips(sport=sport, slip_size=slip_size)
@@ -1685,53 +1735,42 @@ async def fallback_text_handler(update: Update, context: ContextTypes.DEFAULT_TY
     intent = _message_intent(incoming_text)
 
     if stage != "ready":
-        # Let BoB still be useful before full onboarding is complete.
-        if intent in ("games_today", "games_tomorrow"):
-            td = date.today() + timedelta(days=1) if intent == "games_tomorrow" else None
-            min_prob = _detect_min_probability_from_text(incoming_text)
-            await _reply_with_games_today(update, context, user_id=user_id, profile=profile or {}, target_date=td, min_probability=min_prob)
-            await _reply_logged(
-                update,
-                context,
-                "I can already show you games, but to personalize slips properly I still need to finish your quick onboarding.",
-                user_id=user_id,
-                intent="onboarding_nudge_after_games",
+        # During onboarding, still handle data requests before asking to complete profile
+        if intent in ("games_today", "games_tomorrow", "generate_slips", "earnings_calc"):
+            pass  # fall through to the routing below
+        else:
+            progressed = await _process_onboarding_text(
+                update, context, user_id=user_id, incoming_text=incoming_text, profile=profile,
             )
-            return
-        if intent == "generate_slips":
-            await _reply_with_slips(update, context, user_id=user_id, profile=profile or {}, request_text=incoming_text)
-            await _reply_logged(
-                update,
-                context,
-                "I can already draft slips, but to personalize them properly I still need to finish your quick onboarding.",
-                user_id=user_id,
-                intent="onboarding_nudge_after_slips",
-            )
-            return
-        progressed = await _process_onboarding_text(
-            update,
-            context,
-            user_id=user_id,
-            incoming_text=incoming_text,
-            profile=profile,
-        )
-        if not progressed:
-            return
-        profile = _fetch_profile_for_update(update)
+            if not progressed:
+                return
+            profile = _fetch_profile_for_update(update)
+
+    # ── Claude-powered intent routing ──────────────────────────────────────────
+    # Ask Claude to parse the message into structured intent + parameters.
+    # Falls back to keyword matching when the API key is not configured.
+    parsed = _parse_intent_with_claude(incoming_text)
+    if parsed:
+        intent = parsed.get("intent") or intent
+    else:
+        # Claude unavailable — fall back to keyword intent already computed above
+        parsed = {}
+
+    sports_raw: list[str] = parsed.get("sports") or []
+    min_prob: float = float(parsed.get("min_probability") or _detect_min_probability_from_text(incoming_text))
+    stake_from_parse: float | None = parsed.get("stake_kes") or _detect_stake_from_text(incoming_text)
+
+    # Normalise sports: if Claude detected sports use them, else fall back to explicit keyword detect
+    if sports_raw:
+        sports_filter: list[str] | None = [s.lower() for s in sports_raw]
+    else:
+        explicit = _detect_sport_explicitly(incoming_text)
+        sports_filter = [explicit] if explicit else None
 
     if intent == "earnings_calc":
         await _reply_with_earnings_calc(update, context, user_id=user_id, profile=profile, request_text=incoming_text)
         return
-    if intent == "games_today":
-        min_prob = _detect_min_probability_from_text(incoming_text)
-        explicit_sport = _detect_sport_explicitly(incoming_text)
-        sports_filter = [explicit_sport] if explicit_sport else None
-        await _reply_with_games_today(update, context, user_id=user_id, profile=profile, min_probability=min_prob, sports_filter=sports_filter)
-        return
     if intent == "games_tomorrow":
-        min_prob = _detect_min_probability_from_text(incoming_text)
-        explicit_sport = _detect_sport_explicitly(incoming_text)
-        sports_filter = [explicit_sport] if explicit_sport else None
         await _reply_with_games_today(
             update, context, user_id=user_id, profile=profile,
             target_date=date.today() + timedelta(days=1),
@@ -1739,16 +1778,22 @@ async def fallback_text_handler(update: Update, context: ContextTypes.DEFAULT_TY
             sports_filter=sports_filter,
         )
         return
-    if intent == "generate_slips":
-        await _reply_with_slips(update, context, user_id=user_id, profile=profile, request_text=incoming_text)
+    if intent in ("games_today", "games_list"):
+        await _reply_with_games_today(
+            update, context, user_id=user_id, profile=profile,
+            min_probability=min_prob,
+            sports_filter=sports_filter,
+        )
         return
-    if intent == "performance_summary":
+    if intent == "generate_slips":
+        # Override request_text so _reply_with_slips uses Claude-parsed sport list
+        await _reply_with_slips(update, context, user_id=user_id, profile=profile, request_text=incoming_text, sports_override=sports_filter)
+        return
+    if intent == "performance":
         await _reply_logged(
-            update,
-            context,
-            "I'm almost ready for performance follow-up too. For now I can already help with today's games and generate multiple football or basketball slips from the Bronze, Silver, and Gold pools.",
-            user_id=user_id,
-            intent="performance_stub",
+            update, context,
+            "Performance tracking is coming soon — I'll show you win/loss rates and ROI per slip tier.",
+            user_id=user_id, intent="performance_stub",
         )
         return
     await _reply_with_general_answer(update, context, user_id=user_id, profile=profile, request_text=incoming_text)
