@@ -288,13 +288,16 @@ def _message_intent(text: str) -> str:
     lowered = text.lower().strip()
     if any(tok in lowered for tok in ("earn", "invest", "how much", "profit", "payout", "would i get", "stake")):
         return "earnings_calc"
+    # Check slip/pick BEFORE today so "slips for today" routes to generate_slips, not games display
+    if "slip" in lowered or "pick" in lowered:
+        return "generate_slips"
     if "tomorrow" in lowered:
         return "games_tomorrow"
     if any(token in lowered for token in ("today", "games", "fixtures", "probability", "winning", "confidence", "70%", "80%")):
         return "games_today"
     if "performance" in lowered or "yesterday" in lowered or "result" in lowered:
         return "performance_summary"
-    if "slip" in lowered or "pick" in lowered or "bet" in lowered:
+    if "bet" in lowered:
         return "generate_slips"
     if lowered in {"hi", "hello", "hey", "yo"}:
         return "greeting"
@@ -1226,19 +1229,25 @@ async def _reply_with_slips(
     request_text: str,
 ) -> None:
     preferred_sports = list(profile.get("preferred_sports_json") or ["football"])
-    sport = _detect_sport_from_text(request_text, preferred_sports)
     default_slip_size = int(profile.get("preferred_slip_size") or 3)
     slip_size = _detect_slip_size_from_text(request_text, default_value=default_slip_size)
+    lowered = request_text.lower()
 
-    tiered = _generate_tiered_slips(sport=sport, slip_size=slip_size)
+    # Determine which sports to generate slips for
+    both_mentioned = "football" in lowered and "basketball" in lowered
+    if both_mentioned:
+        sports_to_use = ["football", "basketball"]
+    else:
+        explicit = _detect_sport_explicitly(request_text)
+        sports_to_use = [explicit] if explicit else preferred_sports
 
-    # Store each tier's slip in the DB for tracking
-    for _, _, rows in tiered:
-        if rows:
-            _store_bot_slip(user_id=user_id, update=update, sport=sport, slip_size=slip_size, slip_rows=rows)
-
-    message = _format_tiered_slip_message(sport=sport, tiered_slips=tiered, slip_size=slip_size)
-    await _reply_logged(update, context, message, user_id=user_id, intent="tiered_slip_response", parse_mode="HTML")
+    for sport in sports_to_use:
+        tiered = _generate_tiered_slips(sport=sport, slip_size=slip_size)
+        for _, _, rows in tiered:
+            if rows:
+                _store_bot_slip(user_id=user_id, update=update, sport=sport, slip_size=slip_size, slip_rows=rows)
+        message = _format_tiered_slip_message(sport=sport, tiered_slips=tiered, slip_size=slip_size)
+        await _reply_logged(update, context, message, user_id=user_id, intent="tiered_slip_response", parse_mode="HTML")
 
 
 async def _reply_with_earnings_calc(
