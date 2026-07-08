@@ -1,11 +1,12 @@
 """FastAPI backend for the BOB Telegram Mini App."""
 from __future__ import annotations
 
-from datetime import date, timedelta
+import shutil
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
-from fastapi import FastAPI
+from fastapi import FastAPI, File, Form, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
@@ -21,7 +22,8 @@ from ganji_mtaani_agent.services.telegram_bot import (
     _TIER_EMOJIS,
 )
 
-STATIC_DIR = Path(__file__).parent / "static"
+STATIC_DIR   = Path(__file__).parent / "static"
+UPLOADS_DIR  = Path(__file__).resolve().parents[3] / "uploads" / "betslips"
 
 app = FastAPI(title="BOB Mini App", docs_url=None, redoc_url=None)
 
@@ -36,6 +38,11 @@ app.add_middleware(
 # =============================================================================
 # Pages
 # =============================================================================
+@app.get("/health", include_in_schema=False)
+def health_check():
+    return {"status": "ok"}
+
+
 @app.get("/", include_in_schema=False)
 def serve_index():
     return FileResponse(STATIC_DIR / "index.html")
@@ -44,20 +51,99 @@ def serve_index():
 # =============================================================================
 # API — Today's Slips
 # =============================================================================
+def _record_slip_for_user(user_id: int, sport: str, tier_name: str, tier_range: str,
+                          combined_odds: float, rows: list[dict], today: date) -> None:
+    """Save a viewed slip to bot_slips/bot_slip_legs if not already saved today."""
+    import json as _json
+    with get_postgres_connection(autocommit=True) as conn, conn.cursor(row_factory=dict_row) as cur:
+        cur.execute(
+            """
+            SELECT id FROM bot_slips
+            WHERE user_id = %s AND sport = %s AND event_date = %s
+              AND bucket_labels_json::text ILIKE %s
+            LIMIT 1
+            """,
+            (user_id, sport, today, f'%{tier_name}%'),
+        )
+        if cur.fetchone():
+            return   # already recorded today
+
+        cur.execute(
+            """
+            INSERT INTO bot_slips
+              (user_id, channel, sport, slip_size, bucket_labels_json,
+               status, event_date, total_combined_odds, source_logic, created_at, updated_at)
+            VALUES (%s, 'miniapp', %s, %s, %s::jsonb, 'pending', %s, %s, 'miniapp_view', NOW(), NOW())
+            RETURNING id
+            """,
+            (user_id, sport, len(rows),
+             _json.dumps([f"{tier_name} ({tier_range})"]),
+             today, combined_odds),
+        )
+        slip_row = cur.fetchone()
+        if not slip_row:
+            return
+        slip_id = slip_row["id"]
+
+        for i, r in enumerate(rows, start=1):
+            cur.execute(
+                """
+                INSERT INTO bot_slip_legs
+                  (slip_id, leg_no, sport, event_date, home_team, away_team,
+                   pred_outcome, pred_probability, probability_bucket,
+                   selected_odds, bookmaker_source, created_at)
+                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,NOW())
+                ON CONFLICT (slip_id, leg_no) DO NOTHING
+                """,
+                (slip_id, i, sport,
+                 r.get("event_date"),
+                 r.get("home_team"), r.get("away_team"),
+                 r.get("pred_outcome"),
+                 r.get("pred_probability"),
+                 r.get("probability_bucket"),
+                 r.get("selected_odds"),
+                 r.get("bookmaker_source")),
+            )
+
+
 @app.get("/api/today-slips")
-def get_today_slips() -> dict[str, list[dict[str, Any]]]:
-    """Return Gold/Silver/Bronze tiered slips for football and basketball."""
+def get_today_slips(telegram_user_id: str | None = None) -> dict[str, list[dict[str, Any]]]:
+    """Return Gold/Silver/Bronze tiered slips for football and basketball.
+    If telegram_user_id is provided, auto-saves the slips for that user."""
     today = date.today()
     result: dict[str, list[dict[str, Any]]] = {}
 
-    tier_defs = [
-        ("Gold",   "90-100%", 90.0, 101.0),
-        ("Silver", "80-90%",  80.0,  90.0),
-        ("Bronze", "70-80%",  70.0,  80.0),
-    ]
+    # Resolve internal user_id once so we can record slips per tier
+    db_user_id: int | None = None
+    if telegram_user_id:
+        try:
+            with get_postgres_connection() as conn, conn.cursor(row_factory=dict_row) as cur:
+                cur.execute(
+                    "SELECT id FROM bot_users WHERE channel='telegram' AND channel_user_id=%s",
+                    (telegram_user_id,),
+                )
+                row = cur.fetchone()
+                db_user_id = row["id"] if row else None
+        except Exception:
+            pass
 
-    for sport in ("football", "basketball"):
-        all_candidates = _fetch_upcoming_forebet_candidates(sport=sport, min_probability=70.0)
+    SLIP_SIZE = 4
+
+    # Football uses 70%+; basketball 80%+ only (Bronze excluded for basketball)
+    sport_config: dict[str, tuple[float, list]] = {
+        "football":   (70.0, [
+            ("Gold",   "90-100%", 90.0, 101.0),
+            ("Silver", "80-90%",  80.0,  90.0),
+            ("Bronze", "70-80%",  70.0,  80.0),
+        ]),
+        "basketball": (80.0, [
+            ("Gold",   "90-100%", 90.0, 101.0),
+            ("Silver", "80-90%",  80.0,  90.0),
+        ]),
+    }
+
+    for sport, (min_prob, tier_defs) in sport_config.items():
+        all_candidates = _fetch_upcoming_forebet_candidates(sport=sport, min_probability=min_prob)
         tiers: list[dict[str, Any]] = []
 
         for tier_name, tier_range, min_p, max_p in tier_defs:
@@ -70,7 +156,27 @@ def get_today_slips() -> dict[str, list[dict[str, Any]]]:
 
             today_pool = [r for r in tier_games if r.get("event_date") == today]
             pool = today_pool if today_pool else tier_games
-            rows = _attach_best_odds(pool[:3], sport=sport)
+
+            # Cross-tier fill: when < SLIP_SIZE games in this tier, pull best
+            # remaining games from lower tiers (still ≥ sport's min_prob)
+            mixed = False
+            if len(pool) < SLIP_SIZE:
+                used = {(r.get("home_team"), r.get("away_team"), str(r.get("event_date"))) for r in pool}
+                fillers = sorted(
+                    [r for r in all_candidates
+                     if (r.get("pred_probability") or 0) >= min_prob
+                     and (r.get("pred_probability") or 0) < min_p
+                     and (r.get("home_team"), r.get("away_team"), str(r.get("event_date"))) not in used],
+                    key=lambda r: -(r.get("pred_probability") or 0),
+                )
+                today_fill  = [r for r in fillers if r.get("event_date") == today]
+                other_fill  = [r for r in fillers if r.get("event_date") != today]
+                fill_picked = (today_fill + other_fill)[: SLIP_SIZE - len(pool)]
+                if fill_picked:
+                    pool  = pool + fill_picked
+                    mixed = True
+
+            rows = _attach_best_odds(pool[:SLIP_SIZE], sport=sport)
 
             combined = 1.0
             for r in rows:
@@ -94,12 +200,21 @@ def get_today_slips() -> dict[str, list[dict[str, Any]]]:
 
             tiers.append({
                 "tier": tier_name,
-                "range": tier_range,
+                "range": f"{tier_range}+" if mixed else tier_range,
                 "emoji": _TIER_EMOJIS.get(tier_name, ""),
                 "games": len(rows),
                 "combined_odds": round(combined, 2),
                 "legs": legs,
+                "mixed": mixed,
             })
+
+            # Auto-record this slip for the user so analytics builds daily
+            if db_user_id and rows:
+                try:
+                    _record_slip_for_user(db_user_id, sport, tier_name, tier_range,
+                                          round(combined, 2), rows, today)
+                except Exception:
+                    pass
 
         result[sport] = tiers
 
@@ -156,21 +271,23 @@ def get_stats() -> dict[str, Any]:
 # API — Successful Teams
 # =============================================================================
 @app.get("/api/successful-teams")
-def get_successful_teams(days: int = 7) -> list[dict[str, Any]]:
+def get_successful_teams(days: int = 7, sport: str = "all") -> list[dict[str, Any]]:
     """Teams appearing most in winning slips over the last N days."""
     cutoff = date.today() - timedelta(days=days)
+    sport_clause = "" if sport == "all" else "AND bsl.sport = %(sport)s"
 
     with get_postgres_connection() as conn, conn.cursor(row_factory=dict_row) as cur:
         cur.execute(
-            """
+            f"""
             WITH team_appearances AS (
                 SELECT bsl.home_team AS team,
                        COUNT(*) AS appearances,
                        COUNT(CASE WHEN bs.status = 'won' THEN 1 END) AS wins
                 FROM bot_slip_legs bsl
                 JOIN bot_slips bs ON bs.id = bsl.slip_id
-                WHERE bs.created_at >= %s
+                WHERE bs.created_at >= %(cutoff)s
                   AND bsl.home_team IS NOT NULL
+                  {sport_clause}
                 GROUP BY bsl.home_team
 
                 UNION ALL
@@ -180,8 +297,9 @@ def get_successful_teams(days: int = 7) -> list[dict[str, Any]]:
                        COUNT(CASE WHEN bs.status = 'won' THEN 1 END) AS wins
                 FROM bot_slip_legs bsl
                 JOIN bot_slips bs ON bs.id = bsl.slip_id
-                WHERE bs.created_at >= %s
+                WHERE bs.created_at >= %(cutoff)s
                   AND bsl.away_team IS NOT NULL
+                  {sport_clause}
                 GROUP BY bsl.away_team
             )
             SELECT team,
@@ -189,11 +307,11 @@ def get_successful_teams(days: int = 7) -> list[dict[str, Any]]:
                    SUM(wins) AS wins
             FROM team_appearances
             GROUP BY team
-            HAVING SUM(appearances) >= 2
+            HAVING SUM(wins) >= 1
             ORDER BY SUM(wins) DESC, SUM(appearances) DESC
             LIMIT 10
             """,
-            (cutoff, cutoff),
+            {"cutoff": cutoff, "sport": sport},
         )
         rows = [dict(r) for r in cur.fetchall()]
 
@@ -345,9 +463,10 @@ def update_user(telegram_user_id: str, body: UserUpdateBody) -> dict[str, Any]:
 # API — Per-user slip history and earnings
 # =============================================================================
 @app.get("/api/user/{telegram_user_id}/stats")
-def get_user_stats(telegram_user_id: str, days: int = 7) -> dict[str, Any]:
-    """Personal slip stats and estimated earnings for a specific user."""
+def get_user_stats(telegram_user_id: str, days: int = 7, sport: str = "all") -> dict[str, Any]:
+    """Personal slip stats and net P&L, optionally filtered by sport."""
     cutoff = date.today() - timedelta(days=days)
+    sport_filter = "" if sport == "all" else "AND bs.sport = %(sport)s"
 
     with get_postgres_connection() as conn, conn.cursor(row_factory=dict_row) as cur:
         cur.execute(
@@ -356,38 +475,45 @@ def get_user_stats(telegram_user_id: str, days: int = 7) -> dict[str, Any]:
         )
         user_row = cur.fetchone()
         if not user_row:
-            return {"total": 0, "won": 0, "lost": 0, "pending": 0, "win_rate": 0, "earned_kes": 0}
+            return {"total": 0, "won": 0, "lost": 0, "pending": 0, "win_rate": 0, "net_pnl_kes": 0}
         user_id = user_row["id"]
 
         cur.execute(
-            """
+            f"""
             SELECT
                 COUNT(*) AS total,
-                COUNT(CASE WHEN status = 'won'  THEN 1 END) AS won,
-                COUNT(CASE WHEN status = 'lost' THEN 1 END) AS lost,
-                COUNT(CASE WHEN status = 'pending' THEN 1 END) AS pending,
-                COALESCE(SUM(CASE WHEN status = 'won' AND total_combined_odds IS NOT NULL
-                    THEN total_combined_odds ELSE 0 END), 0) AS total_odds_won
-            FROM bot_slips
-            WHERE user_id = %s AND created_at >= %s
+                COUNT(CASE WHEN bs.status = 'won'  THEN 1 END) AS won,
+                COUNT(CASE WHEN bs.status = 'lost' THEN 1 END) AS lost,
+                COUNT(CASE WHEN bs.status = 'pending' THEN 1 END) AS pending,
+                COALESCE(SUM(
+                    CASE WHEN bs.status = 'won' AND bs.total_combined_odds IS NOT NULL
+                    THEN COALESCE(bs.stake_kes, bup.stake_kes, 500) * bs.total_combined_odds
+                    ELSE 0 END
+                ), 0) AS gross_won_kes,
+                COALESCE(SUM(
+                    CASE WHEN bs.status IN ('won', 'lost')
+                    THEN COALESCE(bs.stake_kes, bup.stake_kes, 500)
+                    ELSE 0 END
+                ), 0) AS total_staked_kes,
+                COALESCE(MAX(bup.stake_kes), 500) AS daily_stake
+            FROM bot_slips bs
+            LEFT JOIN bot_user_preferences bup ON bup.user_id = bs.user_id
+            WHERE bs.user_id = %(user_id)s AND bs.created_at >= %(cutoff)s
+            {sport_filter}
             """,
-            (user_id, cutoff),
+            {"user_id": user_id, "cutoff": cutoff, "sport": sport},
         )
         stats = dict(cur.fetchone() or {})
-
-        cur.execute(
-            "SELECT COALESCE(stake_kes, 500) AS daily_stake FROM bot_user_preferences WHERE user_id = %s",
-            (user_id,),
-        )
-        pref = cur.fetchone()
-        daily_stake = float((pref or {}).get("daily_stake") or 500)
 
     total = int(stats.get("total") or 0)
     won = int(stats.get("won") or 0)
     lost = int(stats.get("lost") or 0)
     resolved = won + lost
     win_rate = round(100 * won / resolved) if resolved > 0 else 0
-    earned_kes = round(float(stats.get("total_odds_won") or 0) * daily_stake, 0)
+    gross_won = float(stats.get("gross_won_kes") or 0)
+    total_staked = float(stats.get("total_staked_kes") or 0)
+    net_pnl = round(gross_won - total_staked, 0)
+    daily_stake = float(stats.get("daily_stake") or 500)
 
     return {
         "total": total,
@@ -396,13 +522,28 @@ def get_user_stats(telegram_user_id: str, days: int = 7) -> dict[str, Any]:
         "pending": int(stats.get("pending") or 0),
         "win_rate": win_rate,
         "daily_stake_kes": daily_stake,
-        "earned_kes": earned_kes,
+        "net_pnl_kes": net_pnl,
+        "days": days,
     }
 
 
+def _parse_tier(bucket_labels_json) -> str:
+    labels = bucket_labels_json or []
+    label = str(labels[0]) if isinstance(labels, list) and labels else str(labels or "")
+    if "Gold" in label or "90" in label:
+        return "Gold"
+    if "Silver" in label or "80" in label:
+        return "Silver"
+    if "Bronze" in label or "70" in label:
+        return "Bronze"
+    return ""
+
+
 @app.get("/api/user/{telegram_user_id}/slips")
-def get_user_slips(telegram_user_id: str, limit: int = 20) -> list[dict[str, Any]]:
-    """Recent slip history for a user with legs."""
+def get_user_slips(telegram_user_id: str, limit: int = 50, days: int = 90) -> list[dict[str, Any]]:
+    """Slip history for a user with legs, filtered by number of past days."""
+    cutoff = date.today() - timedelta(days=days)
+
     with get_postgres_connection() as conn, conn.cursor(row_factory=dict_row) as cur:
         cur.execute(
             "SELECT id FROM bot_users WHERE channel = 'telegram' AND channel_user_id = %s",
@@ -416,24 +557,24 @@ def get_user_slips(telegram_user_id: str, limit: int = 20) -> list[dict[str, Any
         cur.execute(
             """
             SELECT bs.id, bs.sport, bs.slip_size, bs.status, bs.event_date,
-                   bs.total_combined_odds, bs.created_at,
-                   COALESCE(bup.stake_kes, 500) AS stake_kes
+                   bs.total_combined_odds, bs.created_at, bs.bucket_labels_json,
+                   COALESCE(bs.stake_kes, bup.stake_kes, 500) AS stake_kes
             FROM bot_slips bs
             LEFT JOIN bot_user_preferences bup ON bup.user_id = bs.user_id
-            WHERE bs.user_id = %s
+            WHERE bs.user_id = %s AND bs.created_at >= %s
             ORDER BY bs.created_at DESC
             LIMIT %s
             """,
-            (user_id, limit),
+            (user_id, cutoff, limit),
         )
         slips = [dict(r) for r in cur.fetchall()]
 
-        # Attach legs to each slip
         for slip in slips:
             cur.execute(
                 """
                 SELECT leg_no, home_team, away_team, pred_outcome, pred_probability,
-                       selected_odds, probability_bucket, competition
+                       selected_odds, probability_bucket, competition,
+                       result_outcome, won
                 FROM bot_slip_legs
                 WHERE slip_id = %s
                 ORDER BY leg_no
@@ -441,6 +582,7 @@ def get_user_slips(telegram_user_id: str, limit: int = 20) -> list[dict[str, Any
                 (slip["id"],),
             )
             slip["legs"] = [dict(r) for r in cur.fetchall()]
+            slip["tier"] = _parse_tier(slip.pop("bucket_labels_json", None))
             slip["event_date"] = slip["event_date"].isoformat() if slip.get("event_date") else None
             slip["created_at"] = slip["created_at"].isoformat() if slip.get("created_at") else None
             stake = float(slip.get("stake_kes") or 500)
@@ -449,6 +591,90 @@ def get_user_slips(telegram_user_id: str, limit: int = 20) -> list[dict[str, Any
             slip["stake_kes"] = stake
 
     return slips
+
+
+@app.get("/api/user/{telegram_user_id}/analytics")
+def get_user_analytics(telegram_user_id: str, days: int = 30, sport: str = "all") -> dict[str, Any]:
+    """Per-tier performance breakdown for a user, optionally filtered by sport."""
+    cutoff = date.today() - timedelta(days=days)
+
+    with get_postgres_connection() as conn, conn.cursor(row_factory=dict_row) as cur:
+        cur.execute(
+            "SELECT id FROM bot_users WHERE channel = 'telegram' AND channel_user_id = %s",
+            (telegram_user_id,),
+        )
+        user_row = cur.fetchone()
+        if not user_row:
+            return {"tiers": []}
+        user_id = user_row["id"]
+
+        sport_filter = "" if sport == "all" else "AND bs.sport = %(sport)s"
+        cur.execute(
+            f"""
+            SELECT bs.bucket_labels_json, bs.status, bs.total_combined_odds,
+                   bs.sport,
+                   COALESCE(bs.stake_kes, bup.stake_kes, 500) AS stake_kes
+            FROM bot_slips bs
+            LEFT JOIN bot_user_preferences bup ON bup.user_id = bs.user_id
+            WHERE bs.user_id = %(user_id)s AND bs.created_at >= %(cutoff)s
+              AND bs.status IN ('won', 'lost')
+              {sport_filter}
+            """,
+            {"user_id": user_id, "cutoff": cutoff, "sport": sport},
+        )
+        slips = cur.fetchall()
+
+    buckets: dict[str, dict] = {
+        "Gold":   {"total": 0, "won": 0, "earned": 0.0},
+        "Silver": {"total": 0, "won": 0, "earned": 0.0},
+        "Bronze": {"total": 0, "won": 0, "earned": 0.0},
+    }
+    for slip in slips:
+        tier = _parse_tier(slip["bucket_labels_json"])
+        if tier not in buckets:
+            continue
+        buckets[tier]["total"] += 1
+        if slip["status"] == "won":
+            buckets[tier]["won"] += 1
+            buckets[tier]["earned"] += float(slip.get("total_combined_odds") or 1.0) * float(slip.get("stake_kes") or 500)
+
+    emojis = {"Gold": "🥇", "Silver": "🥈", "Bronze": "🥉"}
+    tiers = []
+    for name in ("Gold", "Silver", "Bronze"):
+        b = buckets[name]
+        resolved = b["total"]
+        win_rate = round(100 * b["won"] / resolved) if resolved > 0 else 0
+        tiers.append({
+            "tier": name,
+            "emoji": emojis[name],
+            "total": b["total"],
+            "won": b["won"],
+            "lost": b["total"] - b["won"],
+            "win_rate": win_rate,
+            "earned_kes": round(b["earned"]),
+        })
+
+    return {"tiers": tiers}
+
+
+# =============================================================================
+# API — Betslip image upload
+# =============================================================================
+@app.post("/api/slips/upload-image")
+async def upload_betslip_image(
+    telegram_user_id: str = Form(...),
+    note: str = Form(""),
+    file: UploadFile = File(...),
+) -> dict[str, Any]:
+    """Save an uploaded betslip image for the user."""
+    UPLOADS_DIR.mkdir(parents=True, exist_ok=True)
+    ext = Path(file.filename or "slip.jpg").suffix or ".jpg"
+    timestamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+    filename = f"{telegram_user_id}_{timestamp}{ext}"
+    dest = UPLOADS_DIR / filename
+    with dest.open("wb") as fh:
+        shutil.copyfileobj(file.file, fh)
+    return {"status": "ok", "filename": filename}
 
 
 # =============================================================================

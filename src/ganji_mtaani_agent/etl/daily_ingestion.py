@@ -33,6 +33,7 @@ from ganji_mtaani_agent.scrapers.flashscore import fetch_flashscore_scoreboard
 from ganji_mtaani_agent.scrapers.polymarket import fetch_polymarket_markets, fetch_polymarket_raw
 from ganji_mtaani_agent.scrapers.sources import get_source_config, get_source_target
 from ganji_mtaani_agent.scrapers.thesportsdb import fetch_events_day
+from ganji_mtaani_agent.settlement import settle_slips
 
 
 postgres_module = importlib.reload(postgres_module)
@@ -117,7 +118,7 @@ class DailyIngestionConfig:
     results_limit: int | None = None
     results_days_back: int = 7
     results_days_forward: int = 3
-    flashscore_days_back: int = 1
+    flashscore_days_back: int = 7
     notes: str | None = None
     selected_tasks: tuple[str, ...] | None = None
 
@@ -1228,6 +1229,13 @@ def run_daily_ingestion(config: DailyIngestionConfig) -> dict[str, Any]:
             },
         )
 
+    # Settle pending slips now that fresh results have been ingested
+    settlement_summary: dict[str, Any] = {}
+    try:
+        settlement_summary = settle_slips()
+    except Exception as exc:
+        settlement_summary = {"error": str(exc)}
+
     return {
         "batch_id": batch_id,
         "batch_date": config.batch_date.isoformat(),
@@ -1236,4 +1244,5 @@ def run_daily_ingestion(config: DailyIngestionConfig) -> dict[str, Any]:
         "successful_sources": successful_sources,
         "failed_sources": failed_sources,
         "outcomes": outcomes,
+        "settlement": settlement_summary,
     }

@@ -11,3 +11,4 @@ __pycache__/
 *.db
 data/raw/
 data/processed/
+uploads/

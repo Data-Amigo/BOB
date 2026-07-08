@@ -1105,15 +1105,23 @@ def _fetch_recent_performance(*, user_id: int, days: int = 7) -> dict[str, Any]:
 
 
 def _generate_tiered_slips(*, sport: str, slip_size: int) -> list[tuple[str, str, list[dict[str, Any]]]]:
-    """Return one Gold/Silver/Bronze slip each, organized by probability tier."""
-    all_candidates = _fetch_upcoming_forebet_candidates(sport=sport, min_probability=70.0)
-    today = date.today()
+    """Return tiered slips organised by probability tier.
 
-    tier_defs = [
+    Football: Gold/Silver/Bronze (70%+, 4-leg slips)
+    Basketball: Gold/Silver only (80%+, 4-leg slips)
+    """
+    # Basketball: 80%+ floor, no Bronze tier
+    min_prob = 70.0 if sport == "football" else 80.0
+    tier_defs: list[tuple[str, str, float, float]] = [
         ("Gold",   "90-100%", 90.0, 101.0),
         ("Silver", "80-90%",  80.0,  90.0),
-        ("Bronze", "70-80%",  70.0,  80.0),
     ]
+    if sport == "football":
+        tier_defs.append(("Bronze", "70-80%", 70.0, 80.0))
+
+    all_candidates = _fetch_upcoming_forebet_candidates(sport=sport, min_probability=min_prob)
+    today = date.today()
+
     result: list[tuple[str, str, list[dict[str, Any]]]] = []
     for tier_name, tier_range, min_p, max_p in tier_defs:
         tier_games = [r for r in all_candidates if min_p <= (r.get("pred_probability") or 0.0) < max_p]

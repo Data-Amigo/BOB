@@ -5,22 +5,20 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
   <title>BOB — Daily Slips</title>
   <script src="https://telegram.org/js/telegram-web-app.js"></script>
-  <link rel="stylesheet" href="/static/style.css" />
+  <link rel="stylesheet" href="/static/style.css?v=6" />
 </head>
 <body>
 
-  <!-- ===== ONBOARDING MODAL (shown on first open) ===== -->
+  <!-- ===== ONBOARDING MODAL ===== -->
   <div id="onboardingOverlay" class="overlay hidden">
     <div class="modal">
       <div class="modal-logo">⚽🏀</div>
       <h2 class="modal-title">Welcome to BOB</h2>
       <p class="modal-subtitle">Your personal betting research assistant</p>
-
       <div class="modal-field">
         <label class="field-label">What should BOB call you?</label>
         <input id="nickInput" class="field-input" type="text" placeholder="Your nickname" maxlength="30" />
       </div>
-
       <div class="modal-field">
         <label class="field-label">Phone number <span class="optional">(optional)</span></label>
         <div class="phone-row">
@@ -29,7 +27,6 @@
         </div>
         <p class="field-hint">Used to track your slips across devices</p>
       </div>
-
       <button id="onboardingDone" class="btn-primary" disabled>Get Started →</button>
     </div>
   </div>
@@ -52,11 +49,15 @@
   <section class="stats-row">
     <div class="stat-card">
       <div class="stat-value" id="statSlipsToday">—</div>
-      <div class="stat-label">My Slips</div>
+      <div class="stat-label" id="statTotalLabel">My Slips</div>
     </div>
     <div class="stat-card">
       <div class="stat-value" id="statWon">—</div>
-      <div class="stat-label">Won (7d)</div>
+      <div class="stat-label" id="statWonLabel">Won</div>
+    </div>
+    <div class="stat-card stat-lost">
+      <div class="stat-value" id="statLost">—</div>
+      <div class="stat-label" id="statLostLabel">Lost</div>
     </div>
     <div class="stat-card highlight">
       <div class="stat-value" id="statWinRate">—</div>
@@ -88,10 +89,10 @@
   <div class="tabs">
     <button class="tab active" data-tab="slips">📋 Today's Slips</button>
     <button class="tab" data-tab="history">🕓 My History</button>
-    <button class="tab" data-tab="teams">🏆 Top Teams</button>
+    <button class="tab" data-tab="analytics">📊 Analytics</button>
   </div>
 
-  <!-- ===== SPORT SUB-TABS (shown in slips tab) ===== -->
+  <!-- ===== SPORT SUB-TABS (slips tab only) ===== -->
   <div class="sport-tabs" id="sportTabs">
     <button class="sport-tab active" data-sport="football">⚽ Football</button>
     <button class="sport-tab" data-sport="basketball">🏀 Basketball</button>
@@ -106,15 +107,76 @@
 
   <!-- ===== HISTORY TAB ===== -->
   <div class="tab-panel" id="panelHistory">
-    <div class="slips-container" id="historyContainer">
+    <!-- Date filter bar + upload button -->
+    <div class="history-toolbar">
+      <div class="filter-bar" id="historyFilterBar" style="padding:0;flex:1">
+        <button class="filter-chip active" data-days="7">7d</button>
+        <button class="filter-chip" data-days="30">30d</button>
+        <button class="filter-chip" data-days="90">3mo</button>
+        <button class="filter-chip" data-days="365">All</button>
+      </div>
+      <button id="uploadSlipBtn" class="btn-upload">📤 Upload</button>
+    </div>
+    <div id="historyContainer">
       <div class="loading"><div class="spinner"></div><p>Loading your slip history…</p></div>
     </div>
   </div>
 
-  <!-- ===== TEAMS TAB ===== -->
-  <div class="tab-panel" id="panelTeams">
-    <div class="slips-container" id="teamsContainer">
-      <div class="loading"><div class="spinner"></div><p>Loading top teams…</p></div>
+  <!-- ===== UPLOAD BETSLIP MODAL ===== -->
+  <div id="uploadOverlay" class="overlay hidden">
+    <div class="modal">
+      <div class="modal-logo">📤</div>
+      <h2 class="modal-title">Upload Betslip</h2>
+      <p class="modal-subtitle">Share your slip image for others to follow</p>
+      <div class="modal-field">
+        <label class="field-label">Slip image <span style="color:#ef5350">*</span></label>
+        <input id="uploadFileInput" class="field-input" type="file" accept="image/*,application/pdf" />
+      </div>
+      <div class="modal-field">
+        <label class="field-label">Note <span class="optional">(optional)</span></label>
+        <input id="uploadNoteInput" class="field-input" type="text" placeholder="e.g. Man Utd treble, KES 200 stake" maxlength="120" />
+      </div>
+      <div id="uploadStatus" class="upload-status hidden"></div>
+      <div style="display:flex;gap:10px;margin-top:8px">
+        <button id="uploadCancelBtn" class="btn-outline" style="flex:1">Cancel</button>
+        <button id="uploadSubmitBtn" class="btn-primary" style="flex:2" disabled>Upload</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ===== ANALYTICS TAB ===== -->
+  <div class="tab-panel" id="panelAnalytics">
+    <!-- Sport + period filters -->
+    <div class="analytics-filters">
+      <div class="sport-tabs" id="analyticsSportTabs" style="padding:0;margin:0">
+        <button class="sport-tab active" data-sport="all">⚽🏀 All</button>
+        <button class="sport-tab" data-sport="football">⚽ Football</button>
+        <button class="sport-tab" data-sport="basketball">🏀 Basketball</button>
+      </div>
+      <div class="filter-bar" id="analyticsFilterBar" style="padding:0;margin:0">
+        <button class="filter-chip active" data-days="30">30d</button>
+        <button class="filter-chip" data-days="90">3mo</button>
+        <button class="filter-chip" data-days="180">6mo</button>
+        <button class="filter-chip" data-days="365">All</button>
+      </div>
+    </div>
+    <div id="analyticsContainer">
+      <div class="loading"><div class="spinner"></div><p>Loading analytics…</p></div>
+    </div>
+  </div>
+
+  <!-- ===== MY PICKS SELECTION BAR (floats over slips tab) ===== -->
+  <div id="picksBar" class="picks-bar hidden">
+    <div class="picks-bar-inner">
+      <div class="picks-bar-left">
+        <span class="picks-label">My Picks</span>
+        <span id="picksDetail" class="picks-detail"></span>
+      </div>
+      <div class="picks-bar-right">
+        <span id="picksOdds" class="picks-odds"></span>
+        <span id="picksPayout" class="picks-payout"></span>
+        <button id="picksClose" class="picks-close">✕</button>
+      </div>
     </div>
   </div>
 
@@ -123,6 +185,6 @@
     <p>BOB Research · Not financial advice · Bet responsibly</p>
   </footer>
 
-  <script src="/static/app.js"></script>
+  <script src="/static/app.js?v=6"></script>
 </body>
 </html>
