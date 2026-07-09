@@ -1,6 +1,7 @@
 """FastAPI backend for the BOB Telegram Mini App."""
 from __future__ import annotations
 
+import os
 import shutil
 from datetime import date, datetime, timedelta
 from pathlib import Path
@@ -27,6 +28,16 @@ UPLOADS_DIR  = Path(__file__).resolve().parents[3] / "uploads" / "betslips"
 
 app = FastAPI(title="BOB Mini App", docs_url=None, redoc_url=None)
 
+
+@app.on_event("startup")
+async def _log_db_config() -> None:
+    url = os.getenv("DATABASE_URL", "")
+    if url:
+        print(f"[startup] DATABASE_URL found: {url[:45]}...", flush=True)
+    else:
+        print("[startup] WARNING: DATABASE_URL is NOT set — will fall back to localhost!", flush=True)
+
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -41,6 +52,16 @@ app.add_middleware(
 @app.get("/health", include_in_schema=False)
 def health_check():
     return {"status": "ok"}
+
+
+@app.get("/api/debug/env", include_in_schema=False)
+def debug_env():
+    url = os.getenv("DATABASE_URL", "")
+    return {
+        "database_url_set": bool(url),
+        "database_url_prefix": url[:40] if url else None,
+        "postgres_host": os.getenv("POSTGRES_HOST", "not set"),
+    }
 
 
 @app.get("/", include_in_schema=False)
