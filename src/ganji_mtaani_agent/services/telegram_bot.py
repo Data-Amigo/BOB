@@ -1879,3 +1879,7 @@ def run_polling_bot() -> None:
         ) from exc
     except TelegramError as exc:
         raise RuntimeError(f"Telegram bot startup failed: {exc}") from exc
+
+
+if __name__ == "__main__":
+    run_polling_bot()

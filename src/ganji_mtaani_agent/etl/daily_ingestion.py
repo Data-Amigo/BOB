@@ -1246,3 +1246,28 @@ def run_daily_ingestion(config: DailyIngestionConfig) -> dict[str, Any]:
         "outcomes": outcomes,
         "settlement": settlement_summary,
     }
+
+
+if __name__ == "__main__":
+    import json as _json
+    import sys as _sys
+
+    _tasks = (
+        "forebet_football",
+        "forebet_basketball",
+        "forebet_football_yesterday_results",
+        "forebet_basketball_yesterday_results",
+        "flashscore_football_yesterday_results",
+        "flashscore_basketball_yesterday_results",
+        "results_soccer",
+        "results_basketball",
+    )
+    _cfg = DailyIngestionConfig(
+        batch_date=date.today(),
+        triggered_by="cli",
+        selected_tasks=_tasks,
+    )
+    print(f"Running ETL for {_cfg.batch_date} — tasks: {list(_tasks)}", flush=True)
+    _result = run_daily_ingestion(_cfg)
+    print(_json.dumps(_result, indent=2, default=str), flush=True)
+    _sys.exit(0 if _result.get("status") in ("success", "partial_success") else 1)
