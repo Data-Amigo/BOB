@@ -32,6 +32,10 @@ app = FastAPI(title="BOB Mini App", docs_url=None, redoc_url=None)
 @app.on_event("startup")
 async def _log_db_config() -> None:
     url = os.getenv("DATABASE_URL", "")
+    all_keys = sorted(os.environ.keys())
+    db_keys = [k for k in all_keys if any(x in k for x in ("DATA", "PG", "POSTGRES", "RAILWAY", "DB"))]
+    print(f"[startup] all env keys: {all_keys}", flush=True)
+    print(f"[startup] DB-related keys: {db_keys}", flush=True)
     if url:
         print(f"[startup] DATABASE_URL found: {url[:45]}...", flush=True)
     else:
@@ -61,6 +65,7 @@ def debug_env():
         "database_url_set": bool(url),
         "database_url_prefix": url[:40] if url else None,
         "postgres_host": os.getenv("POSTGRES_HOST", "not set"),
+        "all_env_var_names": sorted(os.environ.keys()),
     }
 
 
