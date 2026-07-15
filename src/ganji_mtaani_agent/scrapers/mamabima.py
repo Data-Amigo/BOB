@@ -451,31 +451,8 @@ def _upsert_product(conn, product: _Product, data: dict) -> None:
 
 
 def _upsert_rate_tiers(conn, product: _Product, tables: list[dict]) -> int:
-    count = 0
-    with conn.cursor() as cur:
-        cur.execute("DELETE FROM rate_tables WHERE product_slug = %s", (product.slug,))
-        for tbl in tables:
-            hdrs  = [h.lower() for h in tbl.get("headers", [])]
-            cov_i = _find_col(hdrs, ["sum assured", "coverage", "benefit", "cover"])
-            prm_i = _find_col(hdrs, ["annual premium", "premium", "annual"])
-            if cov_i is None and prm_i is None:
-                continue
-            for order, row in enumerate(tbl.get("rows", [])):
-                cov  = _parse_kes(row[cov_i])  if cov_i  is not None and len(row) > cov_i  else None
-                prem = _parse_kes(row[prm_i]) if prm_i is not None and len(row) > prm_i else None
-                if cov is None and prem is None:
-                    continue
-                cur.execute(
-                    """
-                    INSERT INTO rate_tables (product_slug, plan_name, member_type, sum_insured, annual_premium)
-                    VALUES (%s, 'Standard', 'principal', %s, %s)
-                    """,
-                    (product.slug,
-                     int(cov)  if cov  is not None else None,
-                     int(prem) if prem is not None else None),
-                )
-                count += 1
-    return count
+    # Mama Bima product pages don't publish clean rate tables — skip to avoid polluting rate_tables
+    return 0
 
 
 def _upsert_quote_questions(conn, product: _Product, questions: list[dict]) -> int:
