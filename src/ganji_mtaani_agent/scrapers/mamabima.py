@@ -1,17 +1,16 @@
 """Mama Bima insurance scraper → insuranceiq schema.
 
-Phase 1: mamabima.com/plans/* — httpx + BeautifulSoup (SSR pages)
-  Extracts: description, who_is_it_for, who_can_be_covered, eligibility,
-            key_benefits, benefit_options, exclusions, waiting periods, FAQs
+Uses Playwright for everything (product pages + quote flow) so that
+JavaScript-rendered content (FAQ accordions, dynamic sections) is fully captured.
 
-Phase 2: client.mamabima.com/* — Playwright (JS SPA, multi-step)
-  Extracts: quote flow questions step-by-step
+One browser session per product:
+  1. Load product page → expand accordions → extract rich data
+  2. Navigate to quote flow → step through questions
 
 Writes into:
   insuranceiq.insurers
   insuranceiq.products
   insuranceiq.quote_questions
-  (insuranceiq.rate_tables — only if the page publishes clean premium data)
 
 Run standalone:
     python -m ganji_mtaani_agent.scrapers.mamabima
@@ -25,9 +24,8 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
 
-import httpx
-from bs4 import BeautifulSoup, Tag
-from playwright.sync_api import sync_playwright
+from bs4 import BeautifulSoup
+from playwright.sync_api import Page, sync_playwright
 
 from ganji_mtaani_agent.db.postgres import get_postgres_connection
 
@@ -35,13 +33,6 @@ MAMABIMA_BASE = "https://mamabima.com"
 CLIENT_BASE   = "https://client.mamabima.com"
 INSURER_SLUG  = "mamabima"
 INSURER_NAME  = "Mama Bima"
-
-_HEADERS = {
-    "User-Agent": (
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-        "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36"
-    )
-}
 
 # ---------------------------------------------------------------------------
 # Product catalogue
@@ -51,7 +42,7 @@ _HEADERS = {
 class _Product:
     slug:         str
     name:         str
-    product_type: str   # life / health / motor / travel
+    product_type: str
     source_path:  str   # relative to MAMABIMA_BASE
     quote_path:   str   # relative to CLIENT_BASE; "" = no quote flow
 
@@ -69,77 +60,52 @@ CATALOGUE: tuple[_Product, ...] = (
     _Product("mb-estate-planning",   "Estate Planning",        "life",   "/plans/estate-planning",       ""),
 )
 
-# ---------------------------------------------------------------------------
-# Section keyword maps for rich content extraction
-# ---------------------------------------------------------------------------
-
-_WHO_FOR_KW     = re.compile(r"who (is this|should|it's|can i)\b|ideal for|designed for|suited for|this (plan|policy|cover) is for", re.I)
-_WHO_COVERED_KW = re.compile(r"who can be covered|who (is|can be) (covered|insured)|covered (members|persons|individuals)", re.I)
-_BENEFIT_KW     = re.compile(r"benefit|what (you|we|is) (get|cover|offer|include)|cover(age)?s?|features", re.I)
-_EXCLUSION_KW   = re.compile(r"exclusion|not covered|what (is|we don.t|isn.t)|exception", re.I)
-_WAITING_KW     = re.compile(r"waiting period|wait(ing)? time|waiting", re.I)
-_FAQ_KW         = re.compile(r"faq|frequently asked|common question|question", re.I)
-_SKIP_HEADINGS  = re.compile(r"^(get (a )?quote|apply|contact|sign up|register|login|home|menu|nav)", re.I)
-
+_NAV_RE     = re.compile(r"^(next|back|cancel|prev|submit|continue|proceed|get (a )?quote|apply|sign up|login)$", re.I)
+_STEPPER_RE = re.compile(r"^[−\-+]$")
 
 # ---------------------------------------------------------------------------
-# Phase 1: product pages — httpx + BeautifulSoup
+# Phase 1: product page extraction (Playwright)
 # ---------------------------------------------------------------------------
 
-def fetch_product_page(product: _Product) -> dict[str, Any]:
-    url = MAMABIMA_BASE + product.source_path
+def _expand_accordions(page: Page) -> None:
+    """
+    Mamabima FAQ buttons have no aria-expanded — they're plain buttons.
+    We expand them inside _get_faqs() directly. This function handles
+    any other standard accordion patterns that might appear on other products.
+    Presses Escape afterwards to dismiss any overlay accidentally opened
+    (e.g. mobile nav menus that match button[aria-expanded="false"]).
+    """
+    for sel in [
+        'button[aria-expanded="false"]',
+        '[data-state="closed"] > button',
+        'button[data-state="closed"]',
+    ]:
+        try:
+            for el in page.locator(sel).all():
+                try:
+                    if el.is_visible(timeout=500):
+                        el.click(timeout=1_500)
+                        page.wait_for_timeout(250)
+                except Exception:
+                    pass
+        except Exception:
+            pass
+    # Dismiss any overlay that accordion/nav clicks may have opened
     try:
-        r = httpx.get(url, headers=_HEADERS, timeout=30, follow_redirects=True)
-        r.raise_for_status()
-    except Exception as exc:
-        return {"error": str(exc)}
-
-    soup = BeautifulSoup(r.text, "html.parser")
-    sections = _parse_sections(soup)
-
-    return {
-        "description":          _extract_description(soup),
-        "tagline":              _extract_tagline(soup),
-        "min_age":              _extract_ages(soup).get("min"),
-        "max_age":              _extract_ages(soup).get("max"),
-        "who_is_it_for":       _join_section(sections, _WHO_FOR_KW),
-        "who_can_be_covered":  _join_section(sections, _WHO_COVERED_KW),
-        "eligibility_notes":   _extract_eligibility(soup),
-        "key_benefits":        _extract_benefits(soup, sections),
-        "benefit_options":     _extract_benefit_options(soup),
-        "exclusions":          _extract_exclusions(soup, sections),
-        "waiting_period_days": _extract_waiting_days(soup),
-        "waiting_period_notes":_join_section(sections, _WAITING_KW),
-        "faqs":                _extract_faqs(soup, sections),
-        "quote_url":           (CLIENT_BASE + product.quote_path) if product.quote_path else None,
-    }
+        page.keyboard.press("Escape")
+        page.wait_for_timeout(300)
+    except Exception:
+        pass
 
 
-def _parse_sections(soup: BeautifulSoup) -> list[dict]:
-    """Walk headings and collect the text content that follows each one."""
-    sections = []
-    for heading in soup.find_all(["h1", "h2", "h3", "h4"]):
-        title = heading.get_text(strip=True)
-        if not title or _SKIP_HEADINGS.match(title):
-            continue
-        body_parts = []
-        for sibling in heading.find_next_siblings():
-            if sibling.name in ("h1", "h2", "h3", "h4"):
-                break
-            text = sibling.get_text(separator=" ", strip=True)
-            if text:
-                body_parts.append(text)
-        sections.append({"heading": title, "body": " ".join(body_parts)})
-    return sections
+def _soup(page: Page) -> BeautifulSoup:
+    return BeautifulSoup(page.content(), "html.parser")
 
 
-def _join_section(sections: list[dict], pattern: re.Pattern) -> str | None:
-    matched = [s["body"] for s in sections if pattern.search(s["heading"])]
-    return " ".join(matched) if matched else None
+# ---- specific extractors (based on actual Mamabima DOM structure) ----------
 
-
-def _extract_description(soup: BeautifulSoup) -> str:
-    chunks = []
+def _get_description(soup: BeautifulSoup) -> str:
+    chunks: list[str] = []
     for tag in soup.find_all(["h1", "p"]):
         t = tag.get_text(strip=True)
         if len(t) > 60:
@@ -149,7 +115,7 @@ def _extract_description(soup: BeautifulSoup) -> str:
     return " ".join(chunks)
 
 
-def _extract_tagline(soup: BeautifulSoup) -> str | None:
+def _get_tagline(soup: BeautifulSoup) -> str | None:
     for tag in soup.find_all(["h2", "h3", "p"]):
         t = tag.get_text(strip=True)
         if 20 < len(t) < 120:
@@ -157,161 +123,273 @@ def _extract_tagline(soup: BeautifulSoup) -> str | None:
     return None
 
 
-def _extract_ages(soup: BeautifulSoup) -> dict:
+def _get_age_range(soup: BeautifulSoup) -> dict:
     text = soup.get_text(separator=" ")
-    m = re.search(r"(?:ages?\s+)?(\d{1,2})\s*(?:to|[-–])\s*(\d{2,3})\s+years?", text, re.I)
+    m = re.search(r"(\d{1,2})\s*[-–to]+\s*(\d{2,3})\s*years?", text, re.I)
     return {"min": int(m.group(1)), "max": int(m.group(2))} if m else {"min": None, "max": None}
 
 
-def _extract_eligibility(soup: BeautifulSoup) -> str | None:
-    text = soup.get_text(separator=" ")
-    m = re.search(r"(eligible.{0,300})", text, re.I | re.S)
-    return m.group(1).strip()[:500] if m else None
+def _get_who_for_cards(soup: BeautifulSoup) -> list[dict]:
+    """
+    Structure: h2 'Who Is This For?' inside div.text-center.mb-8
+    Parent of that div is a div.rounded-3xl container.
+    Cards inside that container are div.group elements, each with h3 + p.
+    """
+    h2 = soup.find("h2", string=re.compile(r"who is this for", re.I))
+    if not h2:
+        return []
+    # h2 → title div → rounded-3xl container
+    container = h2.find_parent("div", class_=re.compile(r"rounded-3xl"))
+    if not container:
+        return []
+    cards = []
+    for card in container.find_all("div", class_=re.compile(r"\bgroup\b")):
+        h3 = card.find("h3")
+        p  = card.find("p")
+        if h3 and p:
+            cards.append({"title": h3.get_text(strip=True), "description": p.get_text(strip=True)})
+    return cards[:10]
 
 
-def _extract_benefits(soup: BeautifulSoup, sections: list[dict]) -> list[dict]:
-    benefits: list[dict] = []
-
-    # From sections with benefit-related headings
-    for s in sections:
-        if _BENEFIT_KW.search(s["heading"]) and not _EXCLUSION_KW.search(s["heading"]):
-            benefits.append({"title": s["heading"], "description": s["body"][:400]})
-
-    # From <ul>/<ol> lists in the page
-    for ul in soup.find_all(["ul", "ol"]):
-        prev = ul.find_previous(["h2", "h3", "h4", "p"])
-        heading_text = prev.get_text(strip=True) if prev else ""
-        if _EXCLUSION_KW.search(heading_text):
-            continue
-        items = [li.get_text(strip=True) for li in ul.find_all("li") if li.get_text(strip=True)]
-        if 2 <= len(items) <= 20:
-            benefits.append({"title": heading_text or "Benefits", "items": items})
-
-    return benefits[:15]
+def _get_who_covered(soup: BeautifulSoup) -> str | None:
+    h2 = soup.find("h2", string=re.compile(r"who can be covered", re.I))
+    if not h2:
+        return None
+    container = h2.find_parent("div", class_=re.compile(r"rounded-3xl")) or h2.find_parent("div")
+    return container.get_text(separator=" ", strip=True)[:600] if container else None
 
 
-def _extract_benefit_options(soup: BeautifulSoup) -> list[dict] | None:
-    """Extract plan tiers / cover level tables."""
+def _get_waiting_periods(soup: BeautifulSoup) -> list[dict]:
+    """
+    Structure: h2 'Waiting Periods' inside div.text-center.mb-8
+    Parent is a div.rounded-3xl container.
+    Each card: div.flex.items-start.gap-4 with:
+      - div (badge) containing period text e.g. "1 month", "None"
+      - p containing description
+    """
+    h2 = soup.find("h2", string=re.compile(r"waiting period", re.I))
+    if not h2:
+        return []
+    container = h2.find_parent("div", class_=re.compile(r"rounded-3xl"))
+    if not container:
+        return []
+
+    periods = []
+    badge_re = re.compile(r"^(\d+\s+(?:day|week|month|year)s?|None|Immediate|N/A)$", re.I)
+
+    for card in container.find_all("div", class_=re.compile(r"flex items-start gap-4|flex.*items-start.*gap")):
+        # First inner div = badge, first p = description
+        badge_div = card.find("div")
+        desc_p    = card.find("p")
+        if badge_div and desc_p:
+            period = badge_div.get_text(strip=True)
+            desc   = desc_p.get_text(strip=True)
+            if badge_re.match(period) and desc:
+                periods.append({"period": period, "description": desc})
+
+    return periods[:10]
+
+
+def _get_min_waiting_days(periods: list[dict]) -> int | None:
+    days: list[int] = []
+    for p in periods:
+        m = re.match(r"(\d+)\s+(day|week|month|year)", p["period"], re.I)
+        if m:
+            n, unit = int(m.group(1)), m.group(2).lower()
+            mult = {"day": 1, "week": 7, "month": 30, "year": 365}.get(unit, 1)
+            days.append(n * mult)
+    return min(days) if days else None
+
+
+def _get_key_benefits(soup: BeautifulSoup) -> list[dict]:
+    # Mamabima uses h3 cards with icons, not ul/li — extract the h3 + p pairs
+    h2 = soup.find("h2", string=re.compile(r"why.*stand|benefit|how it works|what.*cover", re.I))
+    if not h2:
+        return []
+    container = h2.find_parent(["section", "div"])
+    if not container:
+        return []
+    items = []
+    for h3 in container.find_all("h3"):
+        title = h3.get_text(strip=True)
+        p = h3.find_next_sibling("p") or h3.find_parent("div").find("p") if h3.find_parent("div") else None
+        desc = p.get_text(strip=True) if p else ""
+        if title:
+            items.append({"title": title, "description": desc})
+    return items[:12]
+
+
+def _get_benefit_options(soup: BeautifulSoup) -> list[dict] | None:
     options = []
     for tbl in soup.find_all("table"):
         headers = [th.get_text(strip=True) for th in tbl.find_all("th")]
-        rows = []
-        for tr in tbl.find_all("tr"):
-            cells = [td.get_text(strip=True) for td in tr.find_all("td")]
-            if cells:
-                rows.append(cells)
+        rows = [[td.get_text(strip=True) for td in tr.find_all("td")]
+                for tr in tbl.find_all("tr") if tr.find_all("td")]
         if headers and rows:
             options.append({"headers": headers, "rows": rows})
-    return options if options else None
+    return options or None
 
 
-def _extract_exclusions(soup: BeautifulSoup, sections: list[dict]) -> list[dict]:
-    exclusions: list[dict] = []
-
-    for s in sections:
-        if _EXCLUSION_KW.search(s["heading"]):
-            exclusions.append({"title": s["heading"], "description": s["body"][:500]})
-
-    for ul in soup.find_all(["ul", "ol"]):
-        prev = ul.find_previous(["h2", "h3", "h4", "p"])
-        heading_text = prev.get_text(strip=True) if prev else ""
-        if _EXCLUSION_KW.search(heading_text):
-            items = [li.get_text(strip=True) for li in ul.find_all("li") if li.get_text(strip=True)]
-            if items:
-                exclusions.append({"title": heading_text, "items": items})
-
-    return exclusions
-
-
-def _extract_waiting_days(soup: BeautifulSoup) -> int | None:
-    text = soup.get_text(separator=" ")
-    m = re.search(r"(\d+)\s*(?:-|\s)?\s*(?:day|month)s?\s+waiting", text, re.I)
-    if m:
-        val = int(m.group(1))
-        # convert months to days if needed
-        if "month" in m.group(0).lower():
-            val *= 30
-        return val
-    return None
+def _get_exclusions(soup: BeautifulSoup) -> list[str]:
+    """
+    Structure: h2 'Important Exclusions' inside div[data-slot='card-header']
+    which is inside div[data-slot='card'].
+    The exclusion items are span.leading-relaxed.text-sm inside
+    div[data-slot='card-content'].
+    """
+    h2 = soup.find("h2", string=re.compile(r"important exclusion|exclusion", re.I))
+    if not h2:
+        return []
+    card_header = h2.find_parent(attrs={"data-slot": "card-header"})
+    card = card_header.find_parent(attrs={"data-slot": "card"}) if card_header else None
+    if not card:
+        return []
+    card_content = card.find(attrs={"data-slot": "card-content"})
+    if not card_content:
+        return []
+    # Each exclusion text is in a span with class "leading-relaxed text-sm"
+    items = [
+        span.get_text(strip=True)
+        for span in card_content.find_all("span", class_=re.compile(r"leading-relaxed"))
+        if span.get_text(strip=True)
+    ]
+    return items[:20]
 
 
-def _extract_faqs(soup: BeautifulSoup, sections: list[dict]) -> list[dict]:
+def _get_faqs(page: Page) -> list[dict]:
+    """
+    FAQ answers are JS-injected on click — not present in initial DOM.
+    Structure (inside <section>):
+      div.bg-white.border.border-gray-100.rounded-2xl  (one per FAQ item)
+        button
+          span.font-semibold  ← question text
+          svg (chevron)
+        [div injected here after click with answer p.text-gray-600]
+
+    Strategy: iterate all <section> tags, find the one with the FAQ h2,
+    then click each rounded-2xl button and read the answer.
+    """
     faqs: list[dict] = []
 
-    # From sections with FAQ headings
-    for s in sections:
-        if _FAQ_KW.search(s["heading"]):
-            faqs.append({"question": s["heading"], "answer": s["body"][:600]})
+    # Find the <section> containing the FAQ h2
+    faq_section = None
+    for sec in page.locator("section").all():
+        try:
+            h2s = sec.locator("h2").all()
+            for h2 in h2s:
+                if re.search(r"Frequently|FAQ", h2.inner_text(timeout=300), re.I):
+                    faq_section = sec
+                    break
+        except Exception:
+            pass
+        if faq_section:
+            break
 
-    # From accordion / details elements
-    for details in soup.find_all(["details", "[class*='accordion']", "[class*='faq']"]):
-        summary = details.find("summary")
-        if summary:
-            q = summary.get_text(strip=True)
-            a_parts = [t for t in details.find_all(text=True) if t.strip() and t != summary.get_text()]
-            a = " ".join(a_parts).strip()[:600]
-            if q and a:
-                faqs.append({"question": q, "answer": a})
+    if not faq_section:
+        return faqs
 
-    # Fallback: look for Q&A patterns in text
-    if not faqs:
-        text = soup.get_text(separator="\n")
-        for m in re.finditer(r"Q[:\.]?\s+(.{10,120})\nA[:\.]?\s+(.{10,400})", text):
-            faqs.append({"question": m.group(1).strip(), "answer": m.group(2).strip()})
+    seen: set[str] = set()
+    for item in faq_section.locator("div.rounded-2xl").all():
+        try:
+            btn = item.locator("button").first
+            if btn.count() == 0:
+                continue
+
+            # Get question from the span inside the button (avoids SVG text)
+            q_span = btn.locator("span").first
+            if q_span.count() == 0:
+                continue
+            question = q_span.inner_text(timeout=500).strip()
+            if not question or len(question) < 8 or question in seen or _NAV_RE.match(question):
+                continue
+            seen.add(question)
+
+            # Click via JS to inject the answer — bypasses any overlay interception
+            btn.evaluate("el => el.click()")
+            page.wait_for_timeout(900)  # allow React state + CSS transition
+
+            # The answer is injected as a sibling div to the button inside item
+            full_text = item.inner_text(timeout=1_000).strip()
+            answer = full_text.replace(question, "", 1).strip()
+            # Strip any leftover SVG/icon characters
+            answer = re.sub(r"^[\s\n▲▼›‹↑↓]+", "", answer).strip()
+
+            if len(answer) > 8:
+                faqs.append({"question": question, "answer": answer[:800]})
+
+        except Exception:
+            pass
 
     return faqs[:20]
 
 
+def _extract_page_data(page: Page, product: _Product) -> dict[str, Any]:
+    """Full product page extraction after accordions have been expanded."""
+    s = _soup(page)
+    waiting = _get_waiting_periods(s)
+    who_for = _get_who_for_cards(s)
+
+    return {
+        "description":          _get_description(s),
+        "tagline":              _get_tagline(s),
+        "min_age":              _get_age_range(s).get("min"),
+        "max_age":              _get_age_range(s).get("max"),
+        # Stored as JSON string in TEXT column so structure is preserved
+        "who_is_it_for":       json.dumps(who_for, ensure_ascii=False) if who_for else None,
+        "who_can_be_covered":  _get_who_covered(s),
+        "eligibility_notes":   None,
+        "key_benefits":        _get_key_benefits(s),
+        "benefit_options":     _get_benefit_options(s),
+        "exclusions":          _get_exclusions(s),
+        "waiting_period_days": _get_min_waiting_days(waiting),
+        # Also stored as JSON string for full structured access
+        "waiting_period_notes": json.dumps(waiting, ensure_ascii=False) if waiting else None,
+        "faqs":                 _get_faqs(page),
+        "quote_url":            (CLIENT_BASE + product.quote_path) if product.quote_path else None,
+    }
+
+
 # ---------------------------------------------------------------------------
-# Phase 2: quote questions — Playwright
+# Phase 2: quote flow (same Playwright session)
 # ---------------------------------------------------------------------------
 
-_STEPPER_RE = re.compile(r"^[−\-+]$")
-_NAV_RE     = re.compile(r"^(next|back|cancel|prev|submit|continue|proceed)$", re.I)
-
-
-def scrape_quote_questions(product: _Product, *, max_steps: int = 15) -> list[dict]:
+def _navigate_quote_flow(page: Page, product: _Product, *, max_steps: int = 15) -> list[dict]:
     if not product.quote_path:
         return []
 
     url = CLIENT_BASE + product.quote_path
+    try:
+        page.goto(url, wait_until="domcontentloaded", timeout=60_000)
+        page.wait_for_timeout(3_000)
+    except Exception as exc:
+        print(f"    quote page load failed: {ascii(str(exc))[:80]}", flush=True)
+        return []
+
     questions: list[dict] = []
+    seen: dict[str, int] = {}
 
-    with sync_playwright() as pw:
-        browser = pw.chromium.launch(headless=True)
-        page = browser.new_page()
-        try:
-            page.goto(url, wait_until="domcontentloaded", timeout=60_000)
-            page.wait_for_timeout(3_000)
+    for step_num in range(1, max_steps + 1):
+        step = _extract_step(page, step_num)
+        if not step:
+            break
+        q_text = step["question_text"]
 
-            seen_questions: dict[str, int] = {}
-            for step_num in range(1, max_steps + 1):
-                step = _extract_step(page, step_num)
-                if not step:
-                    break
-                q_text = step["question_text"]
+        if q_text in seen:
+            print(f"    loop detected at step {step_num} (same as step {seen[q_text]}), stopping", flush=True)
+            break
+        seen[q_text] = step_num
 
-                if q_text in seen_questions:
-                    print(f"    loop detected at step {step_num} (same as step {seen_questions[q_text]}), stopping", flush=True)
-                    break
-                seen_questions[q_text] = step_num
+        questions.append(step)
+        print(f"    step {step_num}: {q_text[:70]}", flush=True)
 
-                questions.append(step)
-                print(f"    step {step_num}: {q_text[:70]}", flush=True)
-
-                if not _fill_and_advance(page, step):
-                    break
-                page.wait_for_timeout(2_500)
-
-        except Exception as exc:
-            print(f"    stopped at step {len(questions)+1}: {ascii(str(exc))[:120]}", flush=True)
-        finally:
-            browser.close()
+        if not _fill_and_advance(page, step):
+            break
+        page.wait_for_timeout(2_500)
 
     return questions
 
 
-def _extract_step(page, step_num: int) -> dict | None:
+def _extract_step(page: Page, step_num: int) -> dict | None:
     total    = _read_total_steps(page)
     question = _read_question(page)
     if not question:
@@ -319,7 +397,7 @@ def _extract_step(page, step_num: int) -> dict | None:
     return {"step_number": step_num, "total_steps": total, "question_text": question, **_detect_field(page)}
 
 
-def _read_total_steps(page) -> int | None:
+def _read_total_steps(page: Page) -> int | None:
     for sel in ["[class*='progress']", "[class*='step']", "p", "span"]:
         try:
             for el in page.locator(sel).all()[:5]:
@@ -332,7 +410,7 @@ def _read_total_steps(page) -> int | None:
     return None
 
 
-def _read_question(page) -> str:
+def _read_question(page: Page) -> str:
     for sel in ["[class*='question']", "[class*='label']", "label", "h3", "h2",
                 "[class*='title']", "[class*='heading']", "p", "h1"]:
         try:
@@ -346,7 +424,7 @@ def _read_question(page) -> str:
     return ""
 
 
-def _is_stepper(page) -> bool:
+def _is_stepper(page: Page) -> bool:
     try:
         btns = [b.inner_text().strip() for b in page.get_by_role("button").all() if b.is_visible()]
         return sum(1 for b in btns if _STEPPER_RE.match(b)) >= 1
@@ -354,7 +432,7 @@ def _is_stepper(page) -> bool:
         return False
 
 
-def _detect_field(page) -> dict:
+def _detect_field(page: Page) -> dict:
     if _is_stepper(page):
         try:
             val_el = page.locator('[class*="count"],[class*="value"],[class*="number"],input[readonly]').first
@@ -420,14 +498,14 @@ def _detect_field(page) -> dict:
     return {"field_type": "unknown", "min_value": None, "max_value": None, "default_value": None, "options": None}
 
 
-def _fill_and_advance(page, step: dict) -> bool:
+def _fill_and_advance(page: Page, step: dict) -> bool:
     ft = step.get("field_type", "unknown")
     q  = step.get("question_text", "").lower()
     try:
         if ft == "stepper":
-            plus_btn = page.get_by_role("button", name="+").first
-            if plus_btn.count() > 0 and plus_btn.is_enabled():
-                plus_btn.click()
+            plus = page.get_by_role("button", name="+").first
+            if plus.count() > 0 and plus.is_enabled():
+                plus.click()
                 page.wait_for_timeout(500)
         elif ft == "number":
             val = _pick_number(q, step)
@@ -492,7 +570,41 @@ def _pick_number(question: str, step: dict) -> int:
 
 
 # ---------------------------------------------------------------------------
-# DB helpers — write into insuranceiq schema
+# Per-product scrape (one Playwright session)
+# ---------------------------------------------------------------------------
+
+def scrape_product(product: _Product, *, scrape_quotes: bool = True) -> tuple[dict, list[dict]]:
+    """Open one browser, scrape product page then quote flow."""
+    with sync_playwright() as pw:
+        browser = pw.chromium.launch(headless=True)
+        page = browser.new_page()
+        try:
+            print(f"  [{product.slug}] loading product page...", flush=True)
+            page.goto(MAMABIMA_BASE + product.source_path,
+                      wait_until="networkidle", timeout=60_000)
+            page.wait_for_timeout(2_000)
+
+            print(f"  [{product.slug}] expanding accordions...", flush=True)
+            _expand_accordions(page)
+            page.wait_for_timeout(1_000)
+
+            data = _extract_page_data(page, product)
+
+            questions: list[dict] = []
+            if scrape_quotes and product.quote_path:
+                print(f"  [{product.slug}] scraping quote flow...", flush=True)
+                questions = _navigate_quote_flow(page, product)
+
+        except Exception as exc:
+            raise RuntimeError(f"browser error: {ascii(str(exc))[:200]}") from exc
+        finally:
+            browser.close()
+
+    return data, questions
+
+
+# ---------------------------------------------------------------------------
+# DB helpers
 # ---------------------------------------------------------------------------
 
 def _upsert_insurer(conn) -> None:
@@ -522,8 +634,7 @@ def _upsert_product(conn, product: _Product, data: dict) -> None:
                 faqs, product_url, quote_url, quotable,
                 created_at, updated_at
             ) VALUES (
-                %s,%s,%s,%s,
-                %s,%s,
+                %s,%s,%s,%s, %s,%s,
                 %s,%s,%s,%s,%s,
                 %s::jsonb,%s::jsonb,%s::jsonb,
                 %s,%s,
@@ -583,7 +694,8 @@ def _upsert_quote_questions(conn, product: _Product, questions: list[dict]) -> i
                 ON CONFLICT (insurer_slug, product_slug, step_number) DO NOTHING
                 """,
                 (
-                    INSURER_SLUG, product.slug, q["step_number"], q.get("total_steps"), q["question_text"],
+                    INSURER_SLUG, product.slug,
+                    q["step_number"], q.get("total_steps"), q["question_text"],
                     q.get("field_type"), q.get("min_value"), q.get("max_value"), q.get("default_value"),
                     json.dumps(q["options"]) if q.get("options") else None,
                     True,
@@ -602,21 +714,15 @@ def run_mamabima_scrape(connection, *, scrape_quotes: bool = True) -> dict[str, 
     results: list[dict] = []
 
     for product in CATALOGUE:
-        print(f"  [{product.slug}] fetching product page...", flush=True)
         row: dict[str, Any] = {"slug": product.slug, "questions": 0}
-
         try:
-            data = fetch_product_page(product)
-            if "error" in data:
-                raise RuntimeError(data["error"])
-
+            data, questions = scrape_product(product, scrape_quotes=scrape_quotes)
             _upsert_product(connection, product, data)
-
-            if scrape_quotes and product.quote_path:
-                print(f"  [{product.slug}] scraping quote flow...", flush=True)
-                qs = scrape_quote_questions(product)
-                row["questions"] = _upsert_quote_questions(connection, product, qs)
-
+            row["questions"]     = _upsert_quote_questions(connection, product, questions)
+            row["who_for"]       = bool(data.get("who_is_it_for"))
+            row["exclusions"]    = len(data.get("exclusions") or [])
+            row["waiting"]       = len(json.loads(data.get("waiting_period_notes") or "[]"))
+            row["faqs"]          = len(data.get("faqs") or [])
         except Exception as exc:
             row["error"] = ascii(str(exc))[:200]
             print(f"  [{product.slug}] ERROR: {row['error']}", flush=True)
